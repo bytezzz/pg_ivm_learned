@@ -31,6 +31,11 @@
 #include "utils/regproc.h"
 #include "utils/rel.h"
 #include "utils/varlena.h"
+#include "miscadmin.h"
+#include "storage/ipc.h"
+#include "optimizer/planner.h"
+#include "executor/execdesc.h"
+#include "executor/executor.h"
 
 #include "pg_ivm.h"
 
@@ -40,6 +45,13 @@ static Oid pg_ivm_immv_id = InvalidOid;
 static Oid pg_ivm_immv_pkey_id = InvalidOid;
 
 static object_access_hook_type PrevObjectAccessHook = NULL;
+static shmem_request_hook_type PrevShmemRequestHook = NULL;
+static shmem_startup_hook_type PrevShmemStartupHook = NULL;
+static planner_hook_type PrevPlanHook = NULL;
+static ExecutorStart_hook_type PrevExecutionStartHook = NULL;
+
+static ScheduleState *schedule_state = NULL;
+
 
 void		_PG_init(void);
 
@@ -50,6 +62,11 @@ static void parseNameAndColumns(const char *string, List **names, List **colName
 
 static void PgIvmObjectAccessHook(ObjectAccessType access, Oid classId,
 								  Oid objectId, int subId, void *arg);
+
+static void pg_hook_shmem_request(void);
+static void pg_hook_shmem_startup(void);
+static PlannedStmt *pg_hook_planner(Query *parse, const char *query_string, int cursor_options, ParamListInfo bound_params);
+void pg_hook_execution_start(QueryDesc *queryDesc, int eflags);
 
 /* SQL callable functions */
 PG_FUNCTION_INFO_V1(create_immv);
@@ -87,6 +104,18 @@ _PG_init(void)
 
 	PrevObjectAccessHook = object_access_hook;
 	object_access_hook = PgIvmObjectAccessHook;
+
+	/* Install hooks on shared memory allocation, for query table T and Scheduling Result R. */
+	PrevShmemRequestHook = shmem_request_hook;
+	shmem_request_hook = pg_hook_shmem_request;
+	PrevShmemStartupHook = shmem_startup_hook;
+	shmem_startup_hook = pg_hook_shmem_startup;
+
+	PrevPlanHook = planner_hook;
+	planner_hook = pg_hook_planner;
+
+	PrevExecutionStartHook = ExecutorStart_hook;
+	ExecutorStart_hook = pg_hook_execution_start;
 }
 
 /*
@@ -435,4 +464,69 @@ isImmv(Oid immv_oid)
 		return false;
 	else
 		return true;
+}
+
+
+static void
+pg_hook_shmem_request(void)
+{
+	if (PrevShmemRequestHook)
+		PrevShmemRequestHook();
+
+	RequestAddinShmemSpace(SEGMENT_SIZE);
+	RequestNamedLWLockTranche("pg_hook", 1);
+}
+
+static void
+pg_hook_shmem_startup(void)
+{
+  bool found = false;
+
+	if (PrevShmemStartupHook)
+		PrevShmemStartupHook();
+
+  LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
+  schedule_state = ShmemInitStruct("pg_hook", SEGMENT_SIZE, &found);
+
+  if (!found)
+  {
+		/*Fisrt time through, initialize data structures*/
+    schedule_state->lock = &(GetNamedLWLockTranche("pg_hook")->lock);
+  }
+
+	LWLockRelease(AddinShmemInitLock);
+}
+
+/* Install Hook after planner, we insert query into QueryTable then trigger rescheduling. */
+static PlannedStmt *pg_hook_planner(Query *parse, const char *query_string, int cursor_options, ParamListInfo bound_params)
+{
+  LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+
+	InsertQuery(schedule_state, query_string);
+
+	LWLockRelease(AddinShmemInitLock);
+
+	if (PrevPlanHook)
+		return PrevPlanHook(parse, query_string, cursor_options, bound_params);
+
+	return standard_planner(parse, query_string, cursor_options, bound_params);
+}
+
+/* Hook before query plan being executed, We need to check our scheduling results
+ * and then decide whether to execute the query or not.
+ * Use semaphore to synchronize with scheduler.
+ * Working in Progress.
+*/
+void
+pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
+{
+  LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	elog(INFO, "pg_hook_execution_start");
+	LWLockRelease(AddinShmemInitLock);
+
+	if (PrevExecutionStartHook)
+		PrevExecutionStartHook(queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
 }

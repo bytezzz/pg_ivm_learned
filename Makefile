@@ -7,7 +7,8 @@ OBJS = \
 	matview.o \
 	pg_ivm.o \
 	ruleutils.o \
-	subselect.o
+	subselect.o \
+	querysched.o
 PGFILEDESC = "pg_ivm - incremental view maintenance on PostgreSQL"
 
 EXTENSION = pg_ivm
@@ -21,3 +22,11 @@ REGRESS = pg_ivm create_immv refresh_immv
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+
+# Define the path variable
+PG_PATH ?= /home/vscode/pgsql
+LOG_FILE ?= /home/vscode/logfile
+
+restart:
+	pg_ctl -D $(PG_PATH) -l $(LOG_FILE) stop
+	pg_ctl -D $(PG_PATH) -l $(LOG_FILE) start
