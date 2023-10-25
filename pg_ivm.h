@@ -129,5 +129,6 @@ typedef struct SchedueState
 /* querysched.c */
 
 extern void LogQuery(ScheduleState *state, Query *query, const char *query_string);
+extern void Reschedule(ScheduleState *state);
 
 #endif

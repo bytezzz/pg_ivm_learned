@@ -8,7 +8,6 @@
 
 #include "pg_ivm.h"
 
-static void Reschedule(ScheduleState *state);
 static void LogAffectedTablesRecurse(Query *, Node *, ScheduleState *, Relids *, int);
 static void LogAffectedTables(Query *qry, ScheduleState *state, int index);
 static void LogTableOid(ScheduleState *state, Oid oid, int index);
@@ -166,7 +165,7 @@ LogTableOid(ScheduleState *state, Oid oid, int index)
 }
 
 /* TODO: Implement a heuristic based rescheduling algorithm*/
-static void
+void
 Reschedule(ScheduleState *state)
 {
 	int i;
@@ -174,12 +173,13 @@ Reschedule(ScheduleState *state)
 
 	scheduleTable = &state->scheduleTable;
 
-	if (state->querynum >= 2)
+	for (i = 0; i < MAX_QUERY_NUM; i++)
 	{
-		elog(INFO, "Allowing all queries to execute");
-		for (i = 0; i < state->querynum; i++)
-		{
-			scheduleTable->query_status[i] = QUERY_AVAILABLE;
-		}
+		if (state->queryTable.queries[i].xid == 0)
+			continue;
+
+		scheduleTable->query_status[i] = QUERY_AVAILABLE;
+
+		elog(INFO, "Allowing query: %d", i);
 	}
 }

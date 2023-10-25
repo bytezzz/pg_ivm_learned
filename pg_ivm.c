@@ -616,6 +616,8 @@ pg_hook_execution_finish(QueryDesc *queryDesc)
 
 	schedule_state->querynum--;
 
+	Reschedule(schedule_state);
+
 	LWLockRelease(AddinShmemInitLock);
 
 	elog(INFO, "Destroied query structure on %d", i);
