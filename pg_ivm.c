@@ -52,20 +52,20 @@ static ExecutorStart_hook_type PrevExecutionStartHook = NULL;
 
 static ScheduleState *schedule_state = NULL;
 
-
-void		_PG_init(void);
+void _PG_init(void);
 
 static void IvmXactCallback(XactEvent event, void *arg);
 static void IvmSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 							   SubTransactionId parentSubid, void *arg);
 static void parseNameAndColumns(const char *string, List **names, List **colNames);
 
-static void PgIvmObjectAccessHook(ObjectAccessType access, Oid classId,
-								  Oid objectId, int subId, void *arg);
+static void PgIvmObjectAccessHook(ObjectAccessType access, Oid classId, Oid objectId, int subId,
+								  void *arg);
 
 static void pg_hook_shmem_request(void);
 static void pg_hook_shmem_startup(void);
-static PlannedStmt *pg_hook_planner(Query *parse, const char *query_string, int cursor_options, ParamListInfo bound_params);
+static PlannedStmt *pg_hook_planner(Query *parse, const char *query_string, int cursor_options,
+									ParamListInfo bound_params);
 void pg_hook_execution_start(QueryDesc *queryDesc, int eflags);
 
 /* SQL callable functions */
@@ -85,13 +85,12 @@ IvmXactCallback(XactEvent event, void *arg)
 }
 
 static void
-IvmSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
-				   SubTransactionId parentSubid, void *arg)
+IvmSubXactCallback(SubXactEvent event, SubTransactionId mySubid, SubTransactionId parentSubid,
+				   void *arg)
 {
 	if (event == SUBXACT_EVENT_ABORT_SUB)
 		AtAbort_IVM();
 }
-
 
 /*
  * Module load callback
@@ -125,13 +124,13 @@ _PG_init(void)
 static void
 parseNameAndColumns(const char *string, List **names, List **colNames)
 {
-	char	   *rawname;
-	char	   *ptr;
-	char	   *ptr2;
-	bool		in_quote;
-	bool		has_colnames = false;
-	List	   *cols;
-	ListCell   *lc;
+	char *rawname;
+	char *ptr;
+	char *ptr2;
+	bool in_quote;
+	bool has_colnames = false;
+	List *cols;
+	ListCell *lc;
 
 	/* We need a modifiable copy of the input string. */
 	rawname = pstrdup(string);
@@ -175,18 +174,16 @@ parseNameAndColumns(const char *string, List **names, List **colNames)
 	*ptr2 = '\0';
 
 	if (!SplitIdentifierString(ptr, ',', &cols))
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_NAME),
-				 errmsg("invalid name syntax")));
+		ereport(ERROR, (errcode(ERRCODE_INVALID_NAME), errmsg("invalid name syntax")));
 
 	if (list_length(cols) == 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
 				 errmsg("must specify at least one column name")));
 
-	foreach(lc, cols)
+	foreach (lc, cols)
 	{
-        char       *colname = lfirst(lc);
+		char *colname = lfirst(lc);
 		*colNames = lappend(*colNames, makeString(pstrdup(colname)));
 	}
 
@@ -200,16 +197,16 @@ end:
 Datum
 create_immv(PG_FUNCTION_ARGS)
 {
-	text	*t_relname = PG_GETARG_TEXT_PP(0);
-	text	*t_sql = PG_GETARG_TEXT_PP(1);
-	char	*relname = text_to_cstring(t_relname);
-	char	*sql = text_to_cstring(t_sql);
-	List	*parsetree_list;
-	RawStmt	*parsetree;
-	Query	*query;
+	text *t_relname = PG_GETARG_TEXT_PP(0);
+	text *t_sql = PG_GETARG_TEXT_PP(1);
+	char *relname = text_to_cstring(t_relname);
+	char *sql = text_to_cstring(t_sql);
+	List *parsetree_list;
+	RawStmt *parsetree;
+	Query *query;
 	QueryCompletion qc;
-	List	*names = NIL;
-	List	*colNames = NIL;
+	List *names = NIL;
+	List *colNames = NIL;
 
 	ParseState *pstate = make_parsestate(NULL);
 	CreateTableAsStmt *ctas;
@@ -254,7 +251,7 @@ create_immv(PG_FUNCTION_ARGS)
 	ctas->into->viewQuery = parsetree->stmt;
 	ctas->into->skipData = false;
 
-	query = transformStmt(pstate, (Node *)ctas);
+	query = transformStmt(pstate, (Node *) ctas);
 	Assert(query->commandType == CMD_UTILITY && IsA(query->utilityStmt, CreateTableAsStmt));
 
 	ExecCreateImmv(pstate, (CreateTableAsStmt *) query->utilityStmt, NULL, NULL, &qc);
@@ -268,18 +265,22 @@ create_immv(PG_FUNCTION_ARGS)
 Datum
 refresh_immv(PG_FUNCTION_ARGS)
 {
-	text	*t_relname = PG_GETARG_TEXT_PP(0);
-	bool	ispopulated = PG_GETARG_BOOL(1);
-	char    *relname = text_to_cstring(t_relname);
+	text *t_relname = PG_GETARG_TEXT_PP(0);
+	bool ispopulated = PG_GETARG_BOOL(1);
+	char *relname = text_to_cstring(t_relname);
 	QueryCompletion qc;
 	StringInfoData command_buf;
 
 	initStringInfo(&command_buf);
-	appendStringInfo(&command_buf, "SELECT refresh_immv('%s, %s);",
-					 relname, ispopulated ? "true" : "false");
+	appendStringInfo(&command_buf,
+					 "SELECT refresh_immv('%s, %s);",
+					 relname,
+					 ispopulated ? "true" : "false");
 
 	ExecRefreshImmv(makeRangeVarFromNameList(textToQualifiedNameList(t_relname)),
-					!ispopulated, command_buf.data, &qc);
+					!ispopulated,
+					command_buf.data,
+					&qc);
 
 	PG_RETURN_INT64(qc.nprocessed);
 }
@@ -291,13 +292,12 @@ Datum
 IVM_prevent_immv_change(PG_FUNCTION_ARGS)
 {
 	TriggerData *trigdata = (TriggerData *) fcinfo->context;
-	Relation	rel = trigdata->tg_relation;
+	Relation rel = trigdata->tg_relation;
 
 	if (!ImmvIncrementalMaintenanceIsEnabled())
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("cannot change materialized view \"%s\"",
-						RelationGetRelationName(rel))));
+				 errmsg("cannot change materialized view \"%s\"", RelationGetRelationName(rel))));
 
 	return PointerGetDatum(NULL);
 }
@@ -308,12 +308,13 @@ IVM_prevent_immv_change(PG_FUNCTION_ARGS)
 void
 CreateChangePreventTrigger(Oid matviewOid)
 {
-	ObjectAddress	refaddr;
-	ObjectAddress	address;
+	ObjectAddress refaddr;
+	ObjectAddress address;
 	CreateTrigStmt *ivm_trigger;
 
-	int16 types[4] = {TRIGGER_TYPE_INSERT, TRIGGER_TYPE_DELETE,
-					  TRIGGER_TYPE_UPDATE, TRIGGER_TYPE_TRUNCATE};
+	int16 types[4] = {
+		TRIGGER_TYPE_INSERT, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_UPDATE, TRIGGER_TYPE_TRUNCATE
+	};
 	int i;
 
 	refaddr.classId = RelationRelationId;
@@ -339,8 +340,17 @@ CreateChangePreventTrigger(Oid matviewOid)
 	for (i = 0; i < 4; i++)
 	{
 		ivm_trigger->events = types[i];
-		address = CreateTrigger(ivm_trigger, NULL, matviewOid, InvalidOid, InvalidOid,
-							 InvalidOid, InvalidOid, InvalidOid, NULL, true, false);
+		address = CreateTrigger(ivm_trigger,
+								NULL,
+								matviewOid,
+								InvalidOid,
+								InvalidOid,
+								InvalidOid,
+								InvalidOid,
+								InvalidOid,
+								NULL,
+								true,
+								false);
 
 		recordDependencyOn(&address, &refaddr, DEPENDENCY_AUTO);
 	}
@@ -379,7 +389,7 @@ PgIvmImmvPrimaryKeyIndexId(void)
 Datum
 get_immv_def(PG_FUNCTION_ARGS)
 {
-	Oid	matviewOid = PG_GETARG_OID(0);
+	Oid matviewOid = PG_GETARG_OID(0);
 	Relation matviewRel = NULL;
 	Query *query = NULL;
 	char *querystring = NULL;
@@ -406,8 +416,7 @@ get_immv_def(PG_FUNCTION_ARGS)
  * object_access_hook function for dropping an IMMV
  */
 static void
-PgIvmObjectAccessHook(ObjectAccessType access, Oid classId,
-					  Oid objectId, int subId, void *arg)
+PgIvmObjectAccessHook(ObjectAccessType access, Oid classId, Oid objectId, int subId, void *arg)
 {
 	if (PrevObjectAccessHook)
 		PrevObjectAccessHook(access, classId, objectId, subId, arg);
@@ -421,10 +430,10 @@ PgIvmObjectAccessHook(ObjectAccessType access, Oid classId,
 
 		ScanKeyInit(&key,
 					Anum_pg_ivm_immv_immvrelid,
-					BTEqualStrategyNumber, F_OIDEQ,
+					BTEqualStrategyNumber,
+					F_OIDEQ,
 					ObjectIdGetDatum(objectId));
-		scan = systable_beginscan(pgIvmImmv, PgIvmImmvPrimaryKeyIndexId(),
-								  true, NULL, 1, &key);
+		scan = systable_beginscan(pgIvmImmv, PgIvmImmvPrimaryKeyIndexId(), true, NULL, 1, &key);
 
 		tup = systable_getnext(scan);
 
@@ -450,11 +459,11 @@ isImmv(Oid immv_oid)
 	HeapTuple tup;
 
 	ScanKeyInit(&key,
-			    Anum_pg_ivm_immv_immvrelid,
-				BTEqualStrategyNumber, F_OIDEQ,
+				Anum_pg_ivm_immv_immvrelid,
+				BTEqualStrategyNumber,
+				F_OIDEQ,
 				ObjectIdGetDatum(immv_oid));
-	scan = systable_beginscan(pgIvmImmv, PgIvmImmvPrimaryKeyIndexId(),
-								  true, NULL, 1, &key);
+	scan = systable_beginscan(pgIvmImmv, PgIvmImmvPrimaryKeyIndexId(), true, NULL, 1, &key);
 	tup = systable_getnext(scan);
 
 	systable_endscan(scan);
@@ -465,7 +474,6 @@ isImmv(Oid immv_oid)
 	else
 		return true;
 }
-
 
 static void
 pg_hook_shmem_request(void)
@@ -480,28 +488,30 @@ pg_hook_shmem_request(void)
 static void
 pg_hook_shmem_startup(void)
 {
-  bool found = false;
+	bool found = false;
 
 	if (PrevShmemStartupHook)
 		PrevShmemStartupHook();
 
-  LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
-  schedule_state = ShmemInitStruct("pg_hook", SEGMENT_SIZE, &found);
+	schedule_state = ShmemInitStruct("pg_hook", SEGMENT_SIZE, &found);
 
-  if (!found)
-  {
+	if (!found)
+	{
 		/*Fisrt time through, initialize data structures*/
-    schedule_state->lock = &(GetNamedLWLockTranche("pg_hook")->lock);
-  }
+		schedule_state->lock = &(GetNamedLWLockTranche("pg_hook")->lock);
+	}
 
 	LWLockRelease(AddinShmemInitLock);
 }
 
 /* Install Hook after planner, we insert query into QueryTable then trigger rescheduling. */
-static PlannedStmt *pg_hook_planner(Query *parse, const char *query_string, int cursor_options, ParamListInfo bound_params)
+static PlannedStmt *
+pg_hook_planner(Query *parse, const char *query_string, int cursor_options,
+				ParamListInfo bound_params)
 {
-  LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
 	LogQuery(schedule_state, parse, query_string);
 
@@ -517,7 +527,7 @@ static PlannedStmt *pg_hook_planner(Query *parse, const char *query_string, int 
  * and then decide whether to execute the query or not.
  * Use semaphore to synchronize with scheduler.
  * Working in Progress.
-*/
+ */
 void
 pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 {
@@ -530,8 +540,7 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 	status = false;
 	my_index = -1;
 
-
-  LWLockAcquire(AddinShmemInitLock, LW_SHARED);
+	LWLockAcquire(AddinShmemInitLock, LW_SHARED);
 
 	for (i = 0; i < MAX_QUERY_NUM; i++)
 	{
@@ -549,10 +558,9 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 
 	LWLockRelease(AddinShmemInitLock);
 
-
 	/* We need to switch this into a semaphore implementation */
 	/* Uneffective */
-	for(;;)
+	for (;;)
 	{
 		LWLockAcquire(AddinShmemInitLock, LW_SHARED);
 		status = schedule_state->scheduleTable.query_status[my_index];

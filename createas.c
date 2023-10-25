@@ -52,29 +52,28 @@
 
 typedef struct
 {
-	DestReceiver pub;			/* publicly-known function pointers */
-	IntoClause *into;			/* target relation specification */
+	DestReceiver pub; /* publicly-known function pointers */
+	IntoClause *into; /* target relation specification */
 	/* These fields are filled by intorel_startup: */
-	Relation	rel;			/* relation to write to */
-	ObjectAddress reladdr;		/* address of rel, for ExecCreateTableAs */
-	CommandId	output_cid;		/* cmin to insert in output tuples */
-	int			ti_options;		/* table_tuple_insert performance options */
-	BulkInsertState bistate;	/* bulk insert state */
+	Relation rel;			 /* relation to write to */
+	ObjectAddress reladdr;	 /* address of rel, for ExecCreateTableAs */
+	CommandId output_cid;	 /* cmin to insert in output tuples */
+	int ti_options;			 /* table_tuple_insert performance options */
+	BulkInsertState bistate; /* bulk insert state */
 } DR_intorel;
-
 
 typedef struct
 {
-	bool	has_agg;
-	bool	has_subquery;
-	bool    in_exists_subquery;	/* true, if it is in a exists subquery */
-	bool	in_jointree;		/* true, if it is in a join tree */
-	List    *exists_qual_vars;
-	int		sublevels_up;
+	bool has_agg;
+	bool has_subquery;
+	bool in_exists_subquery; /* true, if it is in a exists subquery */
+	bool in_jointree;		 /* true, if it is in a join tree */
+	List *exists_qual_vars;
+	int sublevels_up;
 } check_ivm_restriction_context;
 
 static void CreateIvmTriggersOnBaseTablesRecurse(Query *qry, Node *node, Oid matviewOid,
-									 Relids *relids, bool ex_lock);
+												 Relids *relids, bool ex_lock);
 static void CreateIvmTrigger(Oid relOid, Oid viewOid, int16 type, int16 timing, bool ex_lock);
 static void check_ivm_restriction(Node *node);
 static bool check_ivm_restriction_walker(Node *node, check_ivm_restriction_context *context);
@@ -93,28 +92,27 @@ static bool CreateTableAsRelExists(CreateTableAsStmt *ctas);
  * This imitates PostgreSQL's ExecCreateTableAs().
  */
 ObjectAddress
-ExecCreateImmv(ParseState *pstate, CreateTableAsStmt *stmt,
-				  ParamListInfo params, QueryEnvironment *queryEnv,
-				  QueryCompletion *qc)
+ExecCreateImmv(ParseState *pstate, CreateTableAsStmt *stmt, ParamListInfo params,
+			   QueryEnvironment *queryEnv, QueryCompletion *qc)
 {
-	Query	   *query = castNode(Query, stmt->query);
+	Query *query = castNode(Query, stmt->query);
 	IntoClause *into = stmt->into;
-	bool		is_matview = (into->viewQuery != NULL);
+	bool is_matview = (into->viewQuery != NULL);
 	DestReceiver *dest;
-	Oid			save_userid = InvalidOid;
-	int			save_sec_context = 0;
-	int			save_nestlevel = 0;
+	Oid save_userid = InvalidOid;
+	int save_sec_context = 0;
+	int save_nestlevel = 0;
 	ObjectAddress address;
-	List	   *rewritten;
+	List *rewritten;
 	PlannedStmt *plan;
-	QueryDesc  *queryDesc;
-	Query	   *viewQuery = (Query *) into->viewQuery;
+	QueryDesc *queryDesc;
+	Query *viewQuery = (Query *) into->viewQuery;
 
 	/*
 	 * We use this always true flag to imitate ExecCreaetTableAs(9
 	 * aiming to make it easier to follow up the original code.
 	 */
-	const bool	is_ivm = true;
+	const bool is_ivm = true;
 
 	/* must be a CREATE MATERIALIZED VIEW statement */
 	Assert(is_matview);
@@ -151,8 +149,7 @@ ExecCreateImmv(ParseState *pstate, CreateTableAsStmt *stmt,
 	if (is_matview)
 	{
 		GetUserIdAndSecContext(&save_userid, &save_sec_context);
-		SetUserIdAndSecContext(save_userid,
-							   save_sec_context | SECURITY_RESTRICTED_OPERATION);
+		SetUserIdAndSecContext(save_userid, save_sec_context | SECURITY_RESTRICTED_OPERATION);
 		save_nestlevel = NewGUCNestLevel();
 	}
 
@@ -162,14 +159,14 @@ ExecCreateImmv(ParseState *pstate, CreateTableAsStmt *stmt,
 		if (contain_mutable_functions((Node *) query))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("mutable function is not supported on incrementally maintainable materialized view"),
+					 errmsg("mutable function is not supported on incrementally maintainable "
+							"materialized view"),
 					 errhint("functions must be marked IMMUTABLE")));
 
 		check_ivm_restriction((Node *) query);
 
 		/* For IMMV, we need to rewrite matview query */
 		query = rewriteQueryForIMMV(viewQuery, into->colNames);
-
 	}
 
 	if (into->skipData)
@@ -182,7 +179,7 @@ ExecCreateImmv(ParseState *pstate, CreateTableAsStmt *stmt,
 		 */
 
 		/* XXX: Currently, WITH NO DATA is not supported in the extension version */
-		//address = create_ctas_nodata(query->targetList, into);
+		// address = create_ctas_nodata(query->targetList, into);
 	}
 	else
 	{
@@ -196,15 +193,14 @@ ExecCreateImmv(ParseState *pstate, CreateTableAsStmt *stmt,
 
 		/* SELECT should never rewrite to more or less than one SELECT query */
 		if (list_length(rewritten) != 1)
-			elog(ERROR, "unexpected rewrite result for %s",
-				 is_matview ? "CREATE MATERIALIZED VIEW" :
-				 "CREATE TABLE AS SELECT");
+			elog(ERROR,
+				 "unexpected rewrite result for %s",
+				 is_matview ? "CREATE MATERIALIZED VIEW" : "CREATE TABLE AS SELECT");
 		query = linitial_node(Query, rewritten);
 		Assert(query->commandType == CMD_SELECT);
 
 		/* plan the query */
-		plan = pg_plan_query(query, pstate->p_sourcetext,
-							 CURSOR_OPT_PARALLEL_OK, params);
+		plan = pg_plan_query(query, pstate->p_sourcetext, CURSOR_OPT_PARALLEL_OK, params);
 
 		/*
 		 * Use a snapshot with an updated command ID to ensure this query sees
@@ -217,9 +213,14 @@ ExecCreateImmv(ParseState *pstate, CreateTableAsStmt *stmt,
 		UpdateActiveSnapshotCommandId();
 
 		/* Create a QueryDesc, redirecting output to our tuple receiver */
-		queryDesc = CreateQueryDesc(plan, pstate->p_sourcetext,
-									GetActiveSnapshot(), InvalidSnapshot,
-									dest, params, queryEnv, 0);
+		queryDesc = CreateQueryDesc(plan,
+									pstate->p_sourcetext,
+									GetActiveSnapshot(),
+									InvalidSnapshot,
+									dest,
+									params,
+									queryEnv,
+									0);
 
 		/* call ExecutorStart to prepare the plan for execution */
 		ExecutorStart(queryDesc, GetIntoRelEFlags(into));
@@ -327,7 +328,7 @@ rewriteQueryForIMMV(Query *query, List *colNames)
 		rewrite_query_for_exists_subquery(rewritten);
 
 		/* Add counting column referring to count(*) in EXISTS clause */
-		foreach(lc, rewritten->rtable)
+		foreach (lc, rewritten->rtable)
 		{
 			char *columnName;
 			int attnum;
@@ -342,8 +343,7 @@ rewriteQueryForIMMV(Query *query, List *colNames)
 			columnName = getColumnNameStartWith(rte, "__ivm_exists", &attnum);
 			if (columnName == NULL)
 				continue;
-			countCol = (Node *) makeVar(varno, attnum,
-						INT8OID, -1, InvalidOid, 0);
+			countCol = (Node *) makeVar(varno, attnum, INT8OID, -1, InvalidOid, 0);
 
 			if (countCol != NULL)
 			{
@@ -356,12 +356,11 @@ rewriteQueryForIMMV(Query *query, List *colNames)
 		}
 	}
 
-
 	/* group keys must be in targetlist */
 	if (rewritten->groupClause)
 	{
 		ListCell *lc;
-		foreach(lc, rewritten->groupClause)
+		foreach (lc, rewritten->groupClause)
 		{
 			SortGroupClause *scl = (SortGroupClause *) lfirst(lc);
 			TargetEntry *tle = get_sortgroupclause_tle(scl, rewritten->targetList);
@@ -369,12 +368,14 @@ rewriteQueryForIMMV(Query *query, List *colNames)
 			if (tle->resjunk)
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("GROUP BY expression not appearing in select list is not supported on incrementally maintainable materialized view")));
+						 errmsg("GROUP BY expression not appearing in select list is not supported "
+								"on incrementally maintainable materialized view")));
 		}
 	}
 	/* Convert DISTINCT to GROUP BY.  count(*) will be added afterward. */
 	else if (!rewritten->hasAggs && rewritten->distinctClause)
-		rewritten->groupClause = transformDistinctClause(NULL, &rewritten->targetList, rewritten->sortClause, false);
+		rewritten->groupClause =
+			transformDistinctClause(NULL, &rewritten->targetList, rewritten->sortClause, false);
 
 	/* Add additional columns for aggregate values */
 	if (rewritten->hasAggs)
@@ -383,11 +384,12 @@ rewriteQueryForIMMV(Query *query, List *colNames)
 		List *aggs = NIL;
 		AttrNumber next_resno = list_length(rewritten->targetList) + 1;
 
-		foreach(lc, rewritten->targetList)
+		foreach (lc, rewritten->targetList)
 		{
 			TargetEntry *tle = (TargetEntry *) lfirst(lc);
 			char *resname = (colNames == NIL || foreach_current_index(lc) >= list_length(colNames) ?
-								tle->resname : strVal(list_nth(colNames, tle->resno - 1)));
+								 tle->resname :
+								 strVal(list_nth(colNames, tle->resno - 1)));
 
 			if (IsA(tle->expr, Aggref))
 				makeIvmAggColumn(pstate, (Aggref *) tle->expr, resname, &next_resno, &aggs);
@@ -410,9 +412,9 @@ rewriteQueryForIMMV(Query *query, List *colNames)
 		node = ParseFuncOrColumn(pstate, fn->funcname, NIL, NULL, fn, false, -1);
 
 		tle = makeTargetEntry((Expr *) node,
-								list_length(rewritten->targetList) + 1,
-								pstrdup("__ivm_count__"),
-								false);
+							  list_length(rewritten->targetList) + 1,
+							  pstrdup("__ivm_count__"),
+							  false);
 		rewritten->targetList = lappend(rewritten->targetList, tle);
 		rewritten->hasAggs = true;
 	}
@@ -434,18 +436,19 @@ rewriteQueryForIMMV(Query *query, List *colNames)
  * In addition, sum() is created for avg aggregate column.
  */
 void
-makeIvmAggColumn(ParseState *pstate, Aggref *aggref, char *resname, AttrNumber *next_resno, List **aggs)
+makeIvmAggColumn(ParseState *pstate, Aggref *aggref, char *resname, AttrNumber *next_resno,
+				 List **aggs)
 {
 	TargetEntry *tle_count;
 	Node *node;
 	FuncCall *fn;
-	Const	*dmy_arg = makeConst(INT4OID,
-								 -1,
-								 InvalidOid,
-								 sizeof(int32),
-								 Int32GetDatum(1),
-								 false,
-								 true); /* pass by value */
+	Const *dmy_arg = makeConst(INT4OID,
+							   -1,
+							   InvalidOid,
+							   sizeof(int32),
+							   Int32GetDatum(1),
+							   false,
+							   true); /* pass by value */
 	const char *aggname = get_func_name(aggref->aggfnoid);
 
 	/*
@@ -466,11 +469,11 @@ makeIvmAggColumn(ParseState *pstate, Aggref *aggref, char *resname, AttrNumber *
 
 		/* Make a Func with a dummy arg, and then override this by the original agg's args. */
 		node = ParseFuncOrColumn(pstate, fn->funcname, list_make1(dmy_arg), NULL, fn, false, -1);
-		((Aggref *)node)->args = aggref->args;
+		((Aggref *) node)->args = aggref->args;
 
 		tle_count = makeTargetEntry((Expr *) node,
 									*next_resno,
-									pstrdup(makeObjectName("__ivm_count",resname, "_")),
+									pstrdup(makeObjectName("__ivm_count", resname, "_")),
 									false);
 		*aggs = lappend(*aggs, tle_count);
 		(*next_resno)++;
@@ -479,10 +482,10 @@ makeIvmAggColumn(ParseState *pstate, Aggref *aggref, char *resname, AttrNumber *
 	{
 		List *dmy_args = NIL;
 		ListCell *lc;
-		foreach(lc, aggref->aggargtypes)
+		foreach (lc, aggref->aggargtypes)
 		{
-			Oid		typeid = lfirst_oid(lc);
-			Type	type = typeidType(typeid);
+			Oid typeid = lfirst_oid(lc);
+			Type type = typeidType(typeid);
 
 			Const *con = makeConst(typeid,
 								   -1,
@@ -502,11 +505,11 @@ makeIvmAggColumn(ParseState *pstate, Aggref *aggref, char *resname, AttrNumber *
 
 		/* Make a Func with dummy args, and then override this by the original agg's args. */
 		node = ParseFuncOrColumn(pstate, fn->funcname, dmy_args, NULL, fn, false, -1);
-		((Aggref *)node)->args = aggref->args;
+		((Aggref *) node)->args = aggref->args;
 
 		tle_count = makeTargetEntry((Expr *) node,
 									*next_resno,
-									pstrdup(makeObjectName("__ivm_sum",resname, "_")),
+									pstrdup(makeObjectName("__ivm_sum", resname, "_")),
 									false);
 		*aggs = lappend(*aggs, tle_count);
 		(*next_resno)++;
@@ -519,8 +522,8 @@ makeIvmAggColumn(ParseState *pstate, Aggref *aggref, char *resname, AttrNumber *
 void
 CreateIvmTriggersOnBaseTables(Query *qry, Oid matviewOid)
 {
-	Relids	relids = NULL;
-	bool	ex_lock = false;
+	Relids relids = NULL;
+	bool ex_lock = false;
 	RangeTblEntry *rte;
 
 	/* Immediately return if we don't have any base tables. */
@@ -547,18 +550,18 @@ CreateIvmTriggersOnBaseTables(Query *qry, Oid matviewOid)
 	 */
 
 	rte = list_nth(qry->rtable, 0);
-	if (list_length(qry->rtable) > 1 || rte->rtekind != RTE_RELATION ||
-		qry->distinctClause || (qry->hasAggs && qry->groupClause))
+	if (list_length(qry->rtable) > 1 || rte->rtekind != RTE_RELATION || qry->distinctClause ||
+		(qry->hasAggs && qry->groupClause))
 		ex_lock = true;
 
-	CreateIvmTriggersOnBaseTablesRecurse(qry, (Node *)qry, matviewOid, &relids, ex_lock);
+	CreateIvmTriggersOnBaseTablesRecurse(qry, (Node *) qry, matviewOid, &relids, ex_lock);
 
 	bms_free(relids);
 }
 
 static void
-CreateIvmTriggersOnBaseTablesRecurse(Query *qry, Node *node, Oid matviewOid,
-									 Relids *relids, bool ex_lock)
+CreateIvmTriggersOnBaseTablesRecurse(Query *qry, Node *node, Oid matviewOid, Relids *relids,
+									 bool ex_lock)
 {
 	if (node == NULL)
 		return;
@@ -569,65 +572,109 @@ CreateIvmTriggersOnBaseTablesRecurse(Query *qry, Node *node, Oid matviewOid,
 	switch (nodeTag(node))
 	{
 		case T_Query:
-			{
-				Query *query = (Query *) node;
-				ListCell *lc;
+		{
+			Query *query = (Query *) node;
+			ListCell *lc;
 
-				CreateIvmTriggersOnBaseTablesRecurse(qry, (Node *)query->jointree, matviewOid, relids, ex_lock);
-				foreach(lc, query->cteList)
-				{
-					CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
-					Assert(IsA(cte->ctequery, Query));
-					CreateIvmTriggersOnBaseTablesRecurse((Query *) cte->ctequery, cte->ctequery, matviewOid, relids, ex_lock);
-				}
+			CreateIvmTriggersOnBaseTablesRecurse(qry,
+												 (Node *) query->jointree,
+												 matviewOid,
+												 relids,
+												 ex_lock);
+			foreach (lc, query->cteList)
+			{
+				CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
+				Assert(IsA(cte->ctequery, Query));
+				CreateIvmTriggersOnBaseTablesRecurse((Query *) cte->ctequery,
+													 cte->ctequery,
+													 matviewOid,
+													 relids,
+													 ex_lock);
 			}
-			break;
+		}
+		break;
 
 		case T_RangeTblRef:
+		{
+			int rti = ((RangeTblRef *) node)->rtindex;
+			RangeTblEntry *rte = rt_fetch(rti, qry->rtable);
+
+			if (rte->rtekind == RTE_RELATION && !bms_is_member(rte->relid, *relids))
 			{
-				int			rti = ((RangeTblRef *) node)->rtindex;
-				RangeTblEntry *rte = rt_fetch(rti, qry->rtable);
+				CreateIvmTrigger(rte->relid,
+								 matviewOid,
+								 TRIGGER_TYPE_INSERT,
+								 TRIGGER_TYPE_BEFORE,
+								 ex_lock);
+				CreateIvmTrigger(rte->relid,
+								 matviewOid,
+								 TRIGGER_TYPE_DELETE,
+								 TRIGGER_TYPE_BEFORE,
+								 ex_lock);
+				CreateIvmTrigger(rte->relid,
+								 matviewOid,
+								 TRIGGER_TYPE_UPDATE,
+								 TRIGGER_TYPE_BEFORE,
+								 ex_lock);
+				CreateIvmTrigger(rte->relid,
+								 matviewOid,
+								 TRIGGER_TYPE_TRUNCATE,
+								 TRIGGER_TYPE_BEFORE,
+								 true);
+				CreateIvmTrigger(rte->relid,
+								 matviewOid,
+								 TRIGGER_TYPE_INSERT,
+								 TRIGGER_TYPE_AFTER,
+								 ex_lock);
+				CreateIvmTrigger(rte->relid,
+								 matviewOid,
+								 TRIGGER_TYPE_DELETE,
+								 TRIGGER_TYPE_AFTER,
+								 ex_lock);
+				CreateIvmTrigger(rte->relid,
+								 matviewOid,
+								 TRIGGER_TYPE_UPDATE,
+								 TRIGGER_TYPE_AFTER,
+								 ex_lock);
+				CreateIvmTrigger(rte->relid,
+								 matviewOid,
+								 TRIGGER_TYPE_TRUNCATE,
+								 TRIGGER_TYPE_AFTER,
+								 true);
 
-				if (rte->rtekind == RTE_RELATION && !bms_is_member(rte->relid, *relids))
-				{
-					CreateIvmTrigger(rte->relid, matviewOid, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_BEFORE, ex_lock);
-					CreateIvmTrigger(rte->relid, matviewOid, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_BEFORE, ex_lock);
-					CreateIvmTrigger(rte->relid, matviewOid, TRIGGER_TYPE_UPDATE, TRIGGER_TYPE_BEFORE, ex_lock);
-					CreateIvmTrigger(rte->relid, matviewOid, TRIGGER_TYPE_TRUNCATE, TRIGGER_TYPE_BEFORE, true);
-					CreateIvmTrigger(rte->relid, matviewOid, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_AFTER, ex_lock);
-					CreateIvmTrigger(rte->relid, matviewOid, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_AFTER, ex_lock);
-					CreateIvmTrigger(rte->relid, matviewOid, TRIGGER_TYPE_UPDATE, TRIGGER_TYPE_AFTER, ex_lock);
-					CreateIvmTrigger(rte->relid, matviewOid, TRIGGER_TYPE_TRUNCATE, TRIGGER_TYPE_AFTER, true);
-
-					*relids = bms_add_member(*relids, rte->relid);
-				}
-				else if (rte->rtekind == RTE_SUBQUERY)
-				{
-					Query *subquery = rte->subquery;
-					Assert(rte->subquery != NULL);
-					CreateIvmTriggersOnBaseTablesRecurse(subquery, (Node *)subquery, matviewOid, relids, ex_lock);
-				}
+				*relids = bms_add_member(*relids, rte->relid);
 			}
-			break;
+			else if (rte->rtekind == RTE_SUBQUERY)
+			{
+				Query *subquery = rte->subquery;
+				Assert(rte->subquery != NULL);
+				CreateIvmTriggersOnBaseTablesRecurse(subquery,
+													 (Node *) subquery,
+													 matviewOid,
+													 relids,
+													 ex_lock);
+			}
+		}
+		break;
 
 		case T_FromExpr:
-			{
-				FromExpr   *f = (FromExpr *) node;
-				ListCell   *l;
+		{
+			FromExpr *f = (FromExpr *) node;
+			ListCell *l;
 
-				foreach(l, f->fromlist)
-					CreateIvmTriggersOnBaseTablesRecurse(qry, lfirst(l), matviewOid, relids, ex_lock);
-			}
-			break;
+			foreach (l, f->fromlist)
+				CreateIvmTriggersOnBaseTablesRecurse(qry, lfirst(l), matviewOid, relids, ex_lock);
+		}
+		break;
 
 		case T_JoinExpr:
-			{
-				JoinExpr   *j = (JoinExpr *) node;
+		{
+			JoinExpr *j = (JoinExpr *) node;
 
-				CreateIvmTriggersOnBaseTablesRecurse(qry, j->larg, matviewOid, relids, ex_lock);
-				CreateIvmTriggersOnBaseTablesRecurse(qry, j->rarg, matviewOid, relids, ex_lock);
-			}
-			break;
+			CreateIvmTriggersOnBaseTablesRecurse(qry, j->larg, matviewOid, relids, ex_lock);
+			CreateIvmTriggersOnBaseTablesRecurse(qry, j->rarg, matviewOid, relids, ex_lock);
+		}
+		break;
 
 		default:
 			elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
@@ -640,8 +687,8 @@ CreateIvmTriggersOnBaseTablesRecurse(Query *qry, Node *node, Oid matviewOid,
 static void
 CreateIvmTrigger(Oid relOid, Oid viewOid, int16 type, int16 timing, bool ex_lock)
 {
-	ObjectAddress	refaddr;
-	ObjectAddress	address;
+	ObjectAddress refaddr;
+	ObjectAddress address;
 	CreateTrigStmt *ivm_trigger;
 	List *transitionRels = NIL;
 
@@ -661,16 +708,20 @@ CreateIvmTrigger(Oid relOid, Oid viewOid, int16 type, int16 timing, bool ex_lock
 	switch (type)
 	{
 		case TRIGGER_TYPE_INSERT:
-			ivm_trigger->trigname = (timing == TRIGGER_TYPE_BEFORE ? "IVM_trigger_ins_before" : "IVM_trigger_ins_after");
+			ivm_trigger->trigname = (timing == TRIGGER_TYPE_BEFORE ? "IVM_trigger_ins_before" :
+																	 "IVM_trigger_ins_after");
 			break;
 		case TRIGGER_TYPE_DELETE:
-			ivm_trigger->trigname = (timing == TRIGGER_TYPE_BEFORE ? "IVM_trigger_del_before" : "IVM_trigger_del_after");
+			ivm_trigger->trigname = (timing == TRIGGER_TYPE_BEFORE ? "IVM_trigger_del_before" :
+																	 "IVM_trigger_del_after");
 			break;
 		case TRIGGER_TYPE_UPDATE:
-			ivm_trigger->trigname = (timing == TRIGGER_TYPE_BEFORE ? "IVM_trigger_upd_before" : "IVM_trigger_upd_after");
+			ivm_trigger->trigname = (timing == TRIGGER_TYPE_BEFORE ? "IVM_trigger_upd_before" :
+																	 "IVM_trigger_upd_after");
 			break;
 		case TRIGGER_TYPE_TRUNCATE:
-			ivm_trigger->trigname = (timing == TRIGGER_TYPE_BEFORE ? "IVM_trigger_truncate_before" : "IVM_trigger_truncate_after");
+			ivm_trigger->trigname = (timing == TRIGGER_TYPE_BEFORE ? "IVM_trigger_truncate_before" :
+																	 "IVM_trigger_truncate_after");
 			break;
 		default:
 			elog(ERROR, "unsupported trigger type");
@@ -711,7 +762,8 @@ CreateIvmTrigger(Oid relOid, Oid viewOid, int16 type, int16 timing, bool ex_lock
 		ex_lock = true;
 
 	ivm_trigger->funcname =
-		(timing == TRIGGER_TYPE_BEFORE ? SystemFuncName("IVM_immediate_before") : SystemFuncName("IVM_immediate_maintenance"));
+		(timing == TRIGGER_TYPE_BEFORE ? SystemFuncName("IVM_immediate_before") :
+										 SystemFuncName("IVM_immediate_maintenance"));
 
 	ivm_trigger->columns = NIL;
 	ivm_trigger->transitionRels = transitionRels;
@@ -720,13 +772,23 @@ CreateIvmTrigger(Oid relOid, Oid viewOid, int16 type, int16 timing, bool ex_lock
 	ivm_trigger->deferrable = false;
 	ivm_trigger->initdeferred = false;
 	ivm_trigger->constrrel = NULL;
-	ivm_trigger->args = list_make2(
-		makeString(DatumGetPointer(DirectFunctionCall1(oidout, ObjectIdGetDatum(viewOid)))),
-		makeString(DatumGetPointer(DirectFunctionCall1(boolout, BoolGetDatum(ex_lock))))
-		);
+	ivm_trigger->args =
+		list_make2(makeString(
+					   DatumGetPointer(DirectFunctionCall1(oidout, ObjectIdGetDatum(viewOid)))),
+				   makeString(
+					   DatumGetPointer(DirectFunctionCall1(boolout, BoolGetDatum(ex_lock)))));
 
-	address = CreateTrigger(ivm_trigger, NULL, relOid, InvalidOid, InvalidOid,
-						 InvalidOid, InvalidOid, InvalidOid, NULL, true, false);
+	address = CreateTrigger(ivm_trigger,
+							NULL,
+							relOid,
+							InvalidOid,
+							InvalidOid,
+							InvalidOid,
+							InvalidOid,
+							InvalidOid,
+							NULL,
+							true,
+							false);
 
 	recordDependencyOn(&address, &refaddr, DEPENDENCY_AUTO);
 
@@ -740,7 +802,7 @@ CreateIvmTrigger(Oid relOid, Oid viewOid, int16 type, int16 timing, bool ex_lock
 static void
 check_ivm_restriction(Node *node)
 {
-	check_ivm_restriction_context context = {false, false, false, false, NIL, 0};
+	check_ivm_restriction_context context = { false, false, false, false, NIL, 0 };
 
 	check_ivm_restriction_walker(node, &context);
 }
@@ -757,333 +819,379 @@ check_ivm_restriction_walker(Node *node, check_ivm_restriction_context *context)
 	switch (nodeTag(node))
 	{
 		case T_Query:
+		{
+			Query *qry = (Query *) node;
+			ListCell *lc;
+			List *vars;
+
+			if (qry->groupClause != NIL && !qry->hasAggs)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("GROUP BY clause without aggregate is not supported on "
+								"incrementally maintainable materialized view")));
+			if (qry->havingQual != NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("HAVING clause is not supported on incrementally maintainable "
+								"materialized view")));
+			if (qry->sortClause !=
+				NIL) /* There is a possibility that we don't need to return an error */
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("ORDER BY clause is not supported on incrementally maintainable "
+								"materialized view")));
+			if (qry->limitOffset != NULL || qry->limitCount != NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("LIMIT/OFFSET clause is not supported on incrementally "
+								"maintainable materialized view")));
+			if (qry->hasDistinctOn)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("DISTINCT ON is not supported on incrementally maintainable "
+								"materialized view")));
+			if (qry->hasWindowFuncs)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("window functions are not supported on incrementally maintainable "
+								"materialized view")));
+			if (qry->groupingSets != NIL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("GROUPING SETS, ROLLUP, or CUBE clauses is not supported on "
+								"incrementally maintainable materialized view")));
+			if (qry->setOperations != NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("UNION/INTERSECT/EXCEPT statements are not supported on "
+								"incrementally maintainable materialized view")));
+			if (list_length(qry->targetList) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("empty target list is not supported on incrementally maintainable "
+								"materialized view")));
+			if (qry->rowMarks != NIL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("FOR UPDATE/SHARE clause is not supported on incrementally "
+								"maintainable materialized view")));
+			if (qry->hasRecursive)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("recursive query is not supported on incrementally maintainable "
+								"materialized view")));
+
+			/* system column restrictions */
+			vars = pull_vars_of_level((Node *) qry, 0);
+			foreach (lc, vars)
 			{
-				Query *qry = (Query *)node;
-				ListCell   *lc;
-				List       *vars;
-
-				if (qry->groupClause != NIL && !qry->hasAggs)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("GROUP BY clause without aggregate is not supported on incrementally maintainable materialized view")));
-				if (qry->havingQual != NULL)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("HAVING clause is not supported on incrementally maintainable materialized view")));
-				if (qry->sortClause != NIL)	/* There is a possibility that we don't need to return an error */
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("ORDER BY clause is not supported on incrementally maintainable materialized view")));
-				if (qry->limitOffset != NULL || qry->limitCount != NULL)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("LIMIT/OFFSET clause is not supported on incrementally maintainable materialized view")));
-				if (qry->hasDistinctOn)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("DISTINCT ON is not supported on incrementally maintainable materialized view")));
-				if (qry->hasWindowFuncs)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("window functions are not supported on incrementally maintainable materialized view")));
-				if (qry->groupingSets != NIL)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("GROUPING SETS, ROLLUP, or CUBE clauses is not supported on incrementally maintainable materialized view")));
-				if (qry->setOperations != NULL)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("UNION/INTERSECT/EXCEPT statements are not supported on incrementally maintainable materialized view")));
-				if (list_length(qry->targetList) == 0)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("empty target list is not supported on incrementally maintainable materialized view")));
-				if (qry->rowMarks != NIL)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("FOR UPDATE/SHARE clause is not supported on incrementally maintainable materialized view")));
-				if (qry->hasRecursive)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("recursive query is not supported on incrementally maintainable materialized view")));
-
-				/* system column restrictions */
-				vars = pull_vars_of_level((Node *) qry, 0);
-				foreach(lc, vars)
+				if (IsA(lfirst(lc), Var))
 				{
-					if (IsA(lfirst(lc), Var))
-					{
-						Var *var = (Var *) lfirst(lc);
-						/* if system column, return error */
-						if (var->varattno < 0)
-							ereport(ERROR,
-									(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-									 errmsg("system column is not supported on incrementally maintainable materialized view")));
-					}
+					Var *var = (Var *) lfirst(lc);
+					/* if system column, return error */
+					if (var->varattno < 0)
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("system column is not supported on incrementally "
+										"maintainable materialized view")));
 				}
+			}
 
-				/* check if type in the top target list had an equality operator */
-				if (context->sublevels_up == 0)
+			/* check if type in the top target list had an equality operator */
+			if (context->sublevels_up == 0)
+			{
+				foreach (lc, qry->targetList)
 				{
-					foreach(lc, qry->targetList)
-					{
-						TargetEntry *tle = (TargetEntry *) lfirst(lc);
-						Oid		atttype = exprType((Node *) tle->expr);
-						Oid		opclass;
+					TargetEntry *tle = (TargetEntry *) lfirst(lc);
+					Oid atttype = exprType((Node *) tle->expr);
+					Oid opclass;
 
-
-						opclass = GetDefaultOpClass(atttype, BTREE_AM_OID);
-						if (!OidIsValid(opclass))
-							ereport(ERROR,
-										(errcode(ERRCODE_UNDEFINED_OBJECT),
-										 errmsg("data type %s has no default operator class for access method \"%s\"",
-												format_type_be(atttype), "btree")));
-					}
+					opclass = GetDefaultOpClass(atttype, BTREE_AM_OID);
+					if (!OidIsValid(opclass))
+						ereport(ERROR,
+								(errcode(ERRCODE_UNDEFINED_OBJECT),
+								 errmsg("data type %s has no default operator class for access "
+										"method \"%s\"",
+										format_type_be(atttype),
+										"btree")));
 				}
+			}
 
-				/* subquery restrictions */
-				if (context->sublevels_up > 0 && qry->distinctClause != NIL)
+			/* subquery restrictions */
+			if (context->sublevels_up > 0 && qry->distinctClause != NIL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("DISTINCT clause in nested query are not supported on "
+								"incrementally maintainable materialized view")));
+			if (context->sublevels_up > 0 && qry->hasAggs)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("aggregate functions in nested query are not supported on "
+								"incrementally maintainable materialized view")));
+
+			context->has_agg |= qry->hasAggs;
+
+			/* restrictions for rtable */
+			foreach (lc, qry->rtable)
+			{
+				RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
+
+				if (rte->tablesample != NULL)
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("DISTINCT clause in nested query are not supported on incrementally maintainable materialized view")));
-				if (context->sublevels_up > 0 && qry->hasAggs)
+							 errmsg("TABLESAMPLE clause is not supported on incrementally "
+									"maintainable materialized view")));
+
+				if (rte->relkind == RELKIND_PARTITIONED_TABLE)
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("aggregate functions in nested query are not supported on incrementally maintainable materialized view")));
+							 errmsg("partitioned table is not supported on incrementally "
+									"maintainable materialized view")));
 
-				context->has_agg |= qry->hasAggs;
+				if (rte->relkind == RELKIND_RELATION && has_superclass(rte->relid))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("partitions is not supported on incrementally maintainable "
+									"materialized view")));
 
-				/* restrictions for rtable */
-				foreach(lc, qry->rtable)
+				if (rte->relkind == RELKIND_RELATION &&
+					find_inheritance_children(rte->relid, NoLock) != NIL)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("inheritance parent is not supported on incrementally "
+									"maintainable materialized view")));
+
+				if (rte->relkind == RELKIND_FOREIGN_TABLE)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("foreign table is not supported on incrementally maintainable "
+									"materialized view")));
+
+				if (rte->relkind == RELKIND_VIEW || rte->relkind == RELKIND_MATVIEW)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("VIEW or MATERIALIZED VIEW is not supported on incrementally "
+									"maintainable materialized view")));
+
+				if (rte->rtekind == RTE_VALUES)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("VALUES is not supported on incrementally maintainable "
+									"materialized view")));
+				if (rte->relkind == RELKIND_RELATION && isImmv(rte->relid))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("including IMMV in definition is not supported on "
+									"incrementally maintainable materialized view")));
+
+				if (rte->rtekind == RTE_SUBQUERY)
 				{
-					RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
+					context->has_subquery = true;
 
-					if (rte->tablesample != NULL)
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("TABLESAMPLE clause is not supported on incrementally maintainable materialized view")));
-
-					if (rte->relkind == RELKIND_PARTITIONED_TABLE)
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("partitioned table is not supported on incrementally maintainable materialized view")));
-
-					if (rte->relkind == RELKIND_RELATION && has_superclass(rte->relid))
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("partitions is not supported on incrementally maintainable materialized view")));
-
-					if (rte->relkind == RELKIND_RELATION && find_inheritance_children(rte->relid, NoLock) != NIL)
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("inheritance parent is not supported on incrementally maintainable materialized view")));
-
-					if (rte->relkind == RELKIND_FOREIGN_TABLE)
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("foreign table is not supported on incrementally maintainable materialized view")));
-
-					if (rte->relkind == RELKIND_VIEW ||
-						rte->relkind == RELKIND_MATVIEW)
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("VIEW or MATERIALIZED VIEW is not supported on incrementally maintainable materialized view")));
-
-					if (rte->rtekind == RTE_VALUES)
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("VALUES is not supported on incrementally maintainable materialized view")));
-					if (rte->relkind == RELKIND_RELATION && isImmv(rte->relid))
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("including IMMV in definition is not supported on incrementally maintainable materialized view")));
-
-					if (rte->rtekind == RTE_SUBQUERY)
-					{
-						context->has_subquery = true;
-
-						context->sublevels_up++;
-						check_ivm_restriction_walker((Node *)rte->subquery, context);
-						context->sublevels_up--;
-					}
+					context->sublevels_up++;
+					check_ivm_restriction_walker((Node *) rte->subquery, context);
+					context->sublevels_up--;
 				}
+			}
 
-				query_tree_walker(qry, check_ivm_restriction_walker, (void *) context, QTW_IGNORE_RT_SUBQUERIES);
+			query_tree_walker(qry,
+							  check_ivm_restriction_walker,
+							  (void *) context,
+							  QTW_IGNORE_RT_SUBQUERIES);
 
-				/*
-				 * additional restriction checks for exists subquery
-				 *
-				 * If the query has any EXISTS clauses and columns in them refer to
-				 * columns in tables in the output query, those columns must be
-				 * included in the target list.
-				 */
-				if (context->exists_qual_vars != NIL && context->sublevels_up == 0)
+			/*
+			 * additional restriction checks for exists subquery
+			 *
+			 * If the query has any EXISTS clauses and columns in them refer to
+			 * columns in tables in the output query, those columns must be
+			 * included in the target list.
+			 */
+			if (context->exists_qual_vars != NIL && context->sublevels_up == 0)
+			{
+				foreach (lc, context->exists_qual_vars)
 				{
-					foreach (lc, context->exists_qual_vars)
-					{
-						Var	*var = (Var *) lfirst(lc);
-						ListCell *lc2;
-						bool found = false;
+					Var *var = (Var *) lfirst(lc);
+					ListCell *lc2;
+					bool found = false;
 
-						foreach(lc2, qry->targetList)
+					foreach (lc2, qry->targetList)
+					{
+						TargetEntry *tle = lfirst(lc2);
+						Var *var2;
+
+						if (!IsA(tle->expr, Var))
+							continue;
+						var2 = (Var *) tle->expr;
+						if (var->varno == var2->varno && var->varattno == var2->varattno)
 						{
-							TargetEntry	*tle = lfirst(lc2);
-							Var *var2;
-
-							if (!IsA(tle->expr, Var))
-								continue;
-							var2 = (Var *) tle->expr;
-							if (var->varno == var2->varno && var->varattno == var2->varattno)
-							{
-								found = true;
-								break;
-							}
+							found = true;
+							break;
 						}
-						if (!found)
-							ereport(ERROR,
-									(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-									 errmsg("this query is not allowed on incrementally maintainable materialized view"),
-									 errhint("targetlist must contain vars that are referred to in EXISTS subquery")));
 					}
+					if (!found)
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("this query is not allowed on incrementally maintainable "
+										"materialized view"),
+								 errhint("targetlist must contain vars that are referred to in "
+										 "EXISTS subquery")));
 				}
-
-				break;
 			}
-		case T_CommonTableExpr:
-			{
-				CommonTableExpr *cte = (CommonTableExpr *) node;
 
-				if (isIvmName(cte->ctename))
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("WITH query name %s is not supported on incrementally maintainable materialized view", cte->ctename)));
-
-				/* 
-				 * When a table in a unreferenced CTE is TRUNCATEd, the contents of the
-				 * IMMV is not affected so it must not be truncated. For confirming it
-				 * at the maintenance time, we have to check if the modified table used
-				 * in a CTE is actually referenced. Although it would be possible, we
-				 * just disallow to create such IMMVs for now since such unreferenced
-				 * CTE is useless unless it doesn't contain modifying commands, that is
-				 * already prohibited.
-				 */
-				if (cte->cterefcount == 0)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("Ureferenced WITH query is not supported on incrementally maintainable materialized view")));
-
-				context->sublevels_up++;
-				check_ivm_restriction_walker(cte->ctequery, (void *) context);
-				context->sublevels_up--;
-				break;
-			}
-		case T_TargetEntry:
-			{
-				TargetEntry *tle = (TargetEntry *)node;
-
-				if (isIvmName(tle->resname))
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("column name %s is not supported on incrementally maintainable materialized view", tle->resname)));
-				if (context->has_agg && !IsA(tle->expr, Aggref) && contain_aggs_of_level((Node *) tle->expr, 0))
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("expression containing an aggregate in it is not supported on incrementally maintainable materialized view")));
-
-				expression_tree_walker(node, check_ivm_restriction_walker, (void *) context);
-				break;
-			}
-                case T_FromExpr:
-                        {
-                                FromExpr   *from = (FromExpr *) node;
-
-				check_ivm_restriction_walker((Node *)from->fromlist, context);
-				context->in_jointree = true;
-				check_ivm_restriction_walker(from->quals, context);
-				context->in_jointree = false;
 			break;
-			}
+		}
+		case T_CommonTableExpr:
+		{
+			CommonTableExpr *cte = (CommonTableExpr *) node;
+
+			if (isIvmName(cte->ctename))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("WITH query name %s is not supported on incrementally maintainable "
+								"materialized view",
+								cte->ctename)));
+
+			/*
+			 * When a table in a unreferenced CTE is TRUNCATEd, the contents of the
+			 * IMMV is not affected so it must not be truncated. For confirming it
+			 * at the maintenance time, we have to check if the modified table used
+			 * in a CTE is actually referenced. Although it would be possible, we
+			 * just disallow to create such IMMVs for now since such unreferenced
+			 * CTE is useless unless it doesn't contain modifying commands, that is
+			 * already prohibited.
+			 */
+			if (cte->cterefcount == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("Ureferenced WITH query is not supported on incrementally "
+								"maintainable materialized view")));
+
+			context->sublevels_up++;
+			check_ivm_restriction_walker(cte->ctequery, (void *) context);
+			context->sublevels_up--;
+			break;
+		}
+		case T_TargetEntry:
+		{
+			TargetEntry *tle = (TargetEntry *) node;
+
+			if (isIvmName(tle->resname))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("column name %s is not supported on incrementally maintainable "
+								"materialized view",
+								tle->resname)));
+			if (context->has_agg && !IsA(tle->expr, Aggref) &&
+				contain_aggs_of_level((Node *) tle->expr, 0))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("expression containing an aggregate in it is not supported on "
+								"incrementally maintainable materialized view")));
+
+			expression_tree_walker(node, check_ivm_restriction_walker, (void *) context);
+			break;
+		}
+		case T_FromExpr:
+		{
+			FromExpr *from = (FromExpr *) node;
+
+			check_ivm_restriction_walker((Node *) from->fromlist, context);
+			context->in_jointree = true;
+			check_ivm_restriction_walker(from->quals, context);
+			context->in_jointree = false;
+			break;
+		}
 		case T_JoinExpr:
-			{
-				JoinExpr *joinexpr = (JoinExpr *)node;
+		{
+			JoinExpr *joinexpr = (JoinExpr *) node;
 
-				if (joinexpr->jointype > JOIN_INNER)
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("OUTER JOIN is not supported on incrementally maintainable materialized view")));
+			if (joinexpr->jointype > JOIN_INNER)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("OUTER JOIN is not supported on incrementally maintainable "
+								"materialized view")));
 
-				expression_tree_walker(node, check_ivm_restriction_walker, (void *) context);
-				break;
-			}
+			expression_tree_walker(node, check_ivm_restriction_walker, (void *) context);
+			break;
+		}
 		case T_Aggref:
-			{
-				/* Check if this supports IVM */
-				Aggref *aggref = (Aggref *) node;
-				const char *aggname = format_procedure(aggref->aggfnoid);
+		{
+			/* Check if this supports IVM */
+			Aggref *aggref = (Aggref *) node;
+			const char *aggname = format_procedure(aggref->aggfnoid);
 
-				if (aggref->aggfilter != NULL)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("aggregate function with FILTER clause is not supported on incrementally maintainable materialized view")));
+			if (aggref->aggfilter != NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("aggregate function with FILTER clause is not supported on "
+								"incrementally maintainable materialized view")));
 
-				if (aggref->aggdistinct != NULL)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("aggregate function with DISTINCT arguments is not supported on incrementally maintainable materialized view")));
+			if (aggref->aggdistinct != NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("aggregate function with DISTINCT arguments is not supported on "
+								"incrementally maintainable materialized view")));
 
-				if (aggref->aggorder != NULL)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("aggregate function with ORDER clause is not supported on incrementally maintainable materialized view")));
+			if (aggref->aggorder != NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("aggregate function with ORDER clause is not supported on "
+								"incrementally maintainable materialized view")));
 
-				if (!check_aggregate_supports_ivm(aggref->aggfnoid))
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("aggregate function %s is not supported on incrementally maintainable materialized view", aggname)));
+			if (!check_aggregate_supports_ivm(aggref->aggfnoid))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("aggregate function %s is not supported on incrementally "
+								"maintainable materialized view",
+								aggname)));
 
-				expression_tree_walker(node, check_ivm_restriction_walker, (void *) context);
-				break;
-			}
+			expression_tree_walker(node, check_ivm_restriction_walker, (void *) context);
+			break;
+		}
 		case T_Var:
-			{
-				Var	*variable = (Var *) node;
-				/*
-				 * Currently, only EXISTS clause is allowed here.
-				 * If EXISTS subquery refers to vars of the upper query, collect these vars.
-				 */
-				if (variable->varlevelsup > 0 && context->in_exists_subquery)
-					context->exists_qual_vars = lappend(context->exists_qual_vars, node);
-				break;
-			}
+		{
+			Var *variable = (Var *) node;
+			/*
+			 * Currently, only EXISTS clause is allowed here.
+			 * If EXISTS subquery refers to vars of the upper query, collect these vars.
+			 */
+			if (variable->varlevelsup > 0 && context->in_exists_subquery)
+				context->exists_qual_vars = lappend(context->exists_qual_vars, node);
+			break;
+		}
 		case T_SubLink:
-			{
-				/* Currently, EXISTS clause is supported only */
-				Query *subselect;
-				SubLink	*sublink = (SubLink *) node;
-				if (!context->in_jointree || sublink->subLinkType != EXISTS_SUBLINK)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("this query is not allowed on incrementally maintainable materialized view"),
-							 errhint("sublink only supports subquery with EXISTS clause in WHERE clause")));
-				if (context->sublevels_up > 0)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("nested sublink is not supported on incrementally maintainable materialized view")));
+		{
+			/* Currently, EXISTS clause is supported only */
+			Query *subselect;
+			SubLink *sublink = (SubLink *) node;
+			if (!context->in_jointree || sublink->subLinkType != EXISTS_SUBLINK)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("this query is not allowed on incrementally maintainable "
+								"materialized view"),
+						 errhint(
+							 "sublink only supports subquery with EXISTS clause in WHERE clause")));
+			if (context->sublevels_up > 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("nested sublink is not supported on incrementally maintainable "
+								"materialized view")));
 
-				subselect = (Query *)sublink->subselect;
-				/* raise ERROR if the sublink has CTE */
-				if (subselect->cteList)
-					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 errmsg("CTE in EXIST clause is not supported on incrementally maintainable materialized view")));
+			subselect = (Query *) sublink->subselect;
+			/* raise ERROR if the sublink has CTE */
+			if (subselect->cteList)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("CTE in EXIST clause is not supported on incrementally "
+								"maintainable materialized view")));
 
-				context->in_exists_subquery = true;
-				context->sublevels_up++;
-				check_ivm_restriction_walker(sublink->subselect, context);
-				context->sublevels_up--;
-				context->in_exists_subquery = false;
-				break;
-			}
+			context->in_exists_subquery = true;
+			context->sublevels_up++;
+			check_ivm_restriction_walker(sublink->subselect, context);
+			context->sublevels_up--;
+			context->in_exists_subquery = false;
+			break;
+		}
 		default:
 			expression_tree_walker(node, check_ivm_restriction_walker, (void *) context);
 			break;
@@ -1177,84 +1285,84 @@ check_aggregate_supports_ivm(Oid aggfnoid)
 	}
 
 #else
-	char *funcs[] = {
-		/* count */
-		"count(\"any\")",
-		"count()",
+	char *funcs[] = { /* count */
+					  "count(\"any\")",
+					  "count()",
 
-		/* sum */
-		"sum(int8)",
-		"sum(int4)",
-		"sum(int2)",
-		"sum(float4)",
-		"sum(float8)",
-		"sum(money)",
-		"sum(interval)",
-		"sum(numeric)",
+					  /* sum */
+					  "sum(int8)",
+					  "sum(int4)",
+					  "sum(int2)",
+					  "sum(float4)",
+					  "sum(float8)",
+					  "sum(money)",
+					  "sum(interval)",
+					  "sum(numeric)",
 
-		/* avg */
-		"avg(int8)",
-		"avg(int4)",
-		"avg(int2)",
-		"avg(numeric)",
-		"avg(float4)",
-		"avg(float8)",
-		"avg(interval)",
+					  /* avg */
+					  "avg(int8)",
+					  "avg(int4)",
+					  "avg(int2)",
+					  "avg(numeric)",
+					  "avg(float4)",
+					  "avg(float8)",
+					  "avg(interval)",
 
-		/* min */
-		"min(anyarray)",
-		"min(int8)",
-		"min(int4)",
-		"min(int2)",
-		"min(oid)",
-		"min(float4)",
-		"min(float8)",
-		"min(date)",
-		"min(time without time zone)",
-		"min(time with time zone)",
-		"min(money)",
-		"min(timestamp without time zone)",
-		"min(timestamp with time zone)",
-		"min(interval)",
-		"min(text)",
-		"min(numeric)",
-		"min(character)",
-		"min(tid)",
-		"min(anyenum)",
-		"min(inet)",
-		"min(pg_lsn)",
+					  /* min */
+					  "min(anyarray)",
+					  "min(int8)",
+					  "min(int4)",
+					  "min(int2)",
+					  "min(oid)",
+					  "min(float4)",
+					  "min(float8)",
+					  "min(date)",
+					  "min(time without time zone)",
+					  "min(time with time zone)",
+					  "min(money)",
+					  "min(timestamp without time zone)",
+					  "min(timestamp with time zone)",
+					  "min(interval)",
+					  "min(text)",
+					  "min(numeric)",
+					  "min(character)",
+					  "min(tid)",
+					  "min(anyenum)",
+					  "min(inet)",
+					  "min(pg_lsn)",
 
-		/* max */
-		"max(anyarray)",
-		"max(int8)",
-		"max(int4)",
-		"max(int2)",
-		"max(oid)",
-		"max(float4)",
-		"max(float8)",
-		"max(date)",
-		"max(time without time zone)",
-		"max(time with time zone)",
-		"max(money)",
-		"max(timestamp without time zone)",
-		"max(timestamp with time zone)",
-		"max(interval)",
-		"max(text)",
-		"max(numeric)",
-		"max(character)",
-		"max(tid)",
-		"max(anyenum)",
-		"max(inet)",
-		"max(pg_lsn)",
+					  /* max */
+					  "max(anyarray)",
+					  "max(int8)",
+					  "max(int4)",
+					  "max(int2)",
+					  "max(oid)",
+					  "max(float4)",
+					  "max(float8)",
+					  "max(date)",
+					  "max(time without time zone)",
+					  "max(time with time zone)",
+					  "max(money)",
+					  "max(timestamp without time zone)",
+					  "max(timestamp with time zone)",
+					  "max(interval)",
+					  "max(text)",
+					  "max(numeric)",
+					  "max(character)",
+					  "max(tid)",
+					  "max(anyenum)",
+					  "max(inet)",
+					  "max(pg_lsn)",
 
-		NULL
+					  NULL
 	};
 
 	char **fname = funcs;
 
 	while (*fname != NULL)
 	{
-		if (DatumGetObjectId(DirectFunctionCall1(to_regprocedure, CStringGetTextDatum(*fname))) == aggfnoid)
+		if (DatumGetObjectId(DirectFunctionCall1(to_regprocedure, CStringGetTextDatum(*fname))) ==
+			aggfnoid)
 			return true;
 		fname++;
 	}
@@ -1277,12 +1385,12 @@ void
 CreateIndexOnIMMV(Query *query, Relation matviewRel)
 {
 	ListCell *lc;
-	IndexStmt  *index;
+	IndexStmt *index;
 	ObjectAddress address;
 	List *constraintList = NIL;
-	char		idxname[NAMEDATALEN];
-	List	   *indexoidlist = RelationGetIndexList(matviewRel);
-	ListCell   *indexoidscan;
+	char idxname[NAMEDATALEN];
+	List *indexoidlist = RelationGetIndexList(matviewRel);
+	ListCell *indexoidscan;
 
 	/*
 	 * For aggregate without GROUP BY, we do not need to create an index
@@ -1302,7 +1410,7 @@ CreateIndexOnIMMV(Query *query, Relation matviewRel)
 	 */
 
 	/* XXX: nulls_not_distinct is available in PG15 or later */
-	//index->nulls_not_distinct = true;
+	// index->nulls_not_distinct = true;
 
 	index->unique = true;
 	index->primary = false;
@@ -1310,10 +1418,9 @@ CreateIndexOnIMMV(Query *query, Relation matviewRel)
 	index->deferrable = false;
 	index->initdeferred = false;
 	index->idxname = idxname;
-	index->relation =
-		makeRangeVar(get_namespace_name(RelationGetNamespace(matviewRel)),
-					 pstrdup(RelationGetRelationName(matviewRel)),
-					 -1);
+	index->relation = makeRangeVar(get_namespace_name(RelationGetNamespace(matviewRel)),
+								   pstrdup(RelationGetRelationName(matviewRel)),
+								   -1);
 	index->accessMethod = DEFAULT_INDEX_TYPE;
 	index->options = NIL;
 	index->tableSpace = get_tablespace_name(matviewRel->rd_rel->reltablespace);
@@ -1338,12 +1445,12 @@ CreateIndexOnIMMV(Query *query, Relation matviewRel)
 	if (query->groupClause)
 	{
 		/* create unique constraint on GROUP BY expression columns */
-		foreach(lc, query->groupClause)
+		foreach (lc, query->groupClause)
 		{
 			SortGroupClause *scl = (SortGroupClause *) lfirst(lc);
 			TargetEntry *tle = get_sortgroupclause_tle(scl, query->targetList);
 			Form_pg_attribute attr = TupleDescAttr(matviewRel->rd_att, tle->resno - 1);
-			IndexElem  *iparam;
+			IndexElem *iparam;
 
 			iparam = makeNode(IndexElem);
 			iparam->name = pstrdup(NameStr(attr->attname));
@@ -1360,11 +1467,11 @@ CreateIndexOnIMMV(Query *query, Relation matviewRel)
 	else if (query->distinctClause)
 	{
 		/* create unique constraint on all columns */
-		foreach(lc, query->targetList)
+		foreach (lc, query->targetList)
 		{
 			TargetEntry *tle = (TargetEntry *) lfirst(lc);
 			Form_pg_attribute attr = TupleDescAttr(matviewRel->rd_att, tle->resno - 1);
-			IndexElem  *iparam;
+			IndexElem *iparam;
 
 			iparam = makeNode(IndexElem);
 			iparam->name = pstrdup(NameStr(attr->attname));
@@ -1386,14 +1493,14 @@ CreateIndexOnIMMV(Query *query, Relation matviewRel)
 		key_attnos = get_primary_key_attnos_from_query(query, &constraintList);
 		if (key_attnos)
 		{
-			foreach(lc, query->targetList)
+			foreach (lc, query->targetList)
 			{
 				TargetEntry *tle = (TargetEntry *) lfirst(lc);
 				Form_pg_attribute attr = TupleDescAttr(matviewRel->rd_att, tle->resno - 1);
 
 				if (bms_is_member(tle->resno - FirstLowInvalidHeapAttributeNumber, key_attnos))
 				{
-					IndexElem  *iparam;
+					IndexElem *iparam;
 
 					iparam = makeNode(IndexElem);
 					iparam->name = pstrdup(NameStr(attr->attname));
@@ -1410,30 +1517,32 @@ CreateIndexOnIMMV(Query *query, Relation matviewRel)
 		}
 		else
 		{
-			/* create no index, just notice that an appropriate index is necessary for efficient IVM */
+			/* create no index, just notice that an appropriate index is necessary for efficient IVM
+			 */
 			ereport(NOTICE,
 					(errmsg("could not create an index on immv \"%s\" automatically",
 							RelationGetRelationName(matviewRel)),
 					 errdetail("This target list does not have all the primary key columns, "
 							   "or this view does not contain GROUP BY or DISTINCT clause."),
-					 errhint("Create an index on the immv for efficient incremental maintenance.")));
+					 errhint(
+						 "Create an index on the immv for efficient incremental maintenance.")));
 			return;
 		}
 	}
 
 	/* If we have a compatible index, we don't need to create another. */
-	foreach(indexoidscan, indexoidlist)
+	foreach (indexoidscan, indexoidlist)
 	{
-		Oid			indexoid = lfirst_oid(indexoidscan);
-		Relation	indexRel;
-		bool		hasCompatibleIndex = false;
+		Oid indexoid = lfirst_oid(indexoidscan);
+		Relation indexRel;
+		bool hasCompatibleIndex = false;
 
 		indexRel = index_open(indexoid, AccessShareLock);
 
 		if (CheckIndexCompatible(indexRel->rd_id,
-								index->accessMethod,
-								index->indexParams,
-								index->excludeOpNames))
+								 index->accessMethod,
+								 index->indexParams,
+								 index->excludeOpNames))
 			hasCompatibleIndex = true;
 
 		index_close(indexRel, AccessShareLock);
@@ -1450,20 +1559,25 @@ CreateIndexOnIMMV(Query *query, Relation matviewRel)
 #if defined(PG_VERSION_NUM) && (PG_VERSION_NUM >= 160000)
 						  -1,
 #endif
-						  false, true, false, false, true);
+						  false,
+						  true,
+						  false,
+						  false,
+						  true);
 
 	ereport(NOTICE,
 			(errmsg("created index \"%s\" on immv \"%s\"",
-					idxname, RelationGetRelationName(matviewRel))));
+					idxname,
+					RelationGetRelationName(matviewRel))));
 
 	/*
 	 * Make dependencies so that the index is dropped if any base tables's
 	 * primary key is dropped.
 	 */
-	foreach(lc, constraintList)
+	foreach (lc, constraintList)
 	{
 		Oid constraintOid = lfirst_oid(lc);
-		ObjectAddress	refaddr;
+		ObjectAddress refaddr;
 
 		refaddr.classId = ConstraintRelationId;
 		refaddr.objectId = constraintOid;
@@ -1472,7 +1586,6 @@ CreateIndexOnIMMV(Query *query, Relation matviewRel)
 		recordDependencyOn(&address, &refaddr, DEPENDENCY_NORMAL);
 	}
 }
-
 
 /*
  * get_primary_key_attnos_from_query
@@ -1496,7 +1609,7 @@ get_primary_key_attnos_from_query(Query *query, List **constraintList)
 	ListCell *lc;
 	int i;
 	Bitmapset *keys = NULL;
-	Relids	rels_in_from;
+	Relids rels_in_from;
 
 	/* convert CTEs to subqueries */
 	query = copyObject(query);
@@ -1517,11 +1630,11 @@ get_primary_key_attnos_from_query(Query *query, List **constraintList)
 	 * Collect primary key attributes from all tables used in query. The key attributes
 	 * sets for each table are stored in key_attnos_list in order by RTE index.
 	 */
-	foreach(lc, query->rtable)
+	foreach (lc, query->rtable)
 	{
-		RangeTblEntry *r = (RangeTblEntry*) lfirst(lc);
+		RangeTblEntry *r = (RangeTblEntry *) lfirst(lc);
 		Bitmapset *key_attnos;
-		bool	has_pkey = true;
+		bool has_pkey = true;
 
 		/* for subqueries, scan recursively */
 		if (r->rtekind == RTE_SUBQUERY)
@@ -1553,7 +1666,7 @@ get_primary_key_attnos_from_query(Query *query, List **constraintList)
 
 	/* Collect key attributes appearing in the target list */
 	i = 1;
-	foreach(lc, query->targetList)
+	foreach (lc, query->targetList)
 	{
 #if defined(PG_VERSION_NUM) && (PG_VERSION_NUM >= 160000)
 		TargetEntry *tle = (TargetEntry *) flatten_join_alias_vars(NULL, query, lfirst(lc));
@@ -1563,7 +1676,7 @@ get_primary_key_attnos_from_query(Query *query, List **constraintList)
 
 		if (IsA(tle->expr, Var))
 		{
-			Var *var = (Var*) tle->expr;
+			Var *var = (Var *) tle->expr;
 			Bitmapset *key_attnos = list_nth(key_attnos_list, var->varno - 1);
 
 			/* check if this attribute is from a base table's primary key */
@@ -1573,7 +1686,8 @@ get_primary_key_attnos_from_query(Query *query, List **constraintList)
 				 * Remove found key attributes from key_attnos_list, and add this
 				 * to the result list.
 				 */
-				key_attnos = bms_del_member(key_attnos, var->varattno - FirstLowInvalidHeapAttributeNumber);
+				key_attnos =
+					bms_del_member(key_attnos, var->varattno - FirstLowInvalidHeapAttributeNumber);
 				if (bms_is_empty(key_attnos))
 				{
 					key_attnos_list = list_delete_nth_cell(key_attnos_list, var->varno - 1);
@@ -1598,9 +1712,9 @@ get_primary_key_attnos_from_query(Query *query, List **constraintList)
 	 * in FROM clause, the target is missing this key attribute, so we return NULL.
 	 */
 	i = 1;
-	foreach(lc, key_attnos_list)
+	foreach (lc, key_attnos_list)
 	{
-		Bitmapset *bms = (Bitmapset *)lfirst(lc);
+		Bitmapset *bms = (Bitmapset *) lfirst(lc);
 		if (!bms_is_empty(bms) && bms_is_member(i, rels_in_from))
 			return NULL;
 		i++;
@@ -1615,20 +1729,20 @@ get_primary_key_attnos_from_query(Query *query, List **constraintList)
 static void
 StoreImmvQuery(Oid viewOid, bool ispopulated, Query *viewQuery)
 {
-	char   *querytree = nodeToString((Node *) viewQuery);
+	char *querytree = nodeToString((Node *) viewQuery);
 	Datum values[Natts_pg_ivm_immv];
 	bool isNulls[Natts_pg_ivm_immv];
 	Relation pgIvmImmv;
 	TupleDesc tupleDescriptor;
 	HeapTuple heapTuple;
-	ObjectAddress	address;
+	ObjectAddress address;
 
 	memset(values, 0, sizeof(values));
 	memset(isNulls, false, sizeof(isNulls));
 
-	values[Anum_pg_ivm_immv_immvrelid -1 ] = ObjectIdGetDatum(viewOid);
-	values[Anum_pg_ivm_immv_ispopulated -1 ] = BoolGetDatum(ispopulated);
-	values[Anum_pg_ivm_immv_viewdef -1 ] = CStringGetTextDatum(querytree);
+	values[Anum_pg_ivm_immv_immvrelid - 1] = ObjectIdGetDatum(viewOid);
+	values[Anum_pg_ivm_immv_ispopulated - 1] = BoolGetDatum(ispopulated);
+	values[Anum_pg_ivm_immv_viewdef - 1] = CStringGetTextDatum(querytree);
 
 	pgIvmImmv = table_open(PgIvmImmvRelationId(), RowExclusiveLock);
 
@@ -1641,8 +1755,7 @@ StoreImmvQuery(Oid viewOid, bool ispopulated, Query *viewQuery)
 	address.objectId = viewOid;
 	address.objectSubId = 0;
 
-	recordDependencyOnExpr(&address, (Node *) viewQuery, NIL,
-						   DEPENDENCY_NORMAL);
+	recordDependencyOnExpr(&address, (Node *) viewQuery, NIL, DEPENDENCY_NORMAL);
 
 	table_close(pgIvmImmv, NoLock);
 
@@ -1660,7 +1773,7 @@ StoreImmvQuery(Oid viewOid, bool ispopulated, Query *viewQuery)
 static bool
 CreateTableAsRelExists(CreateTableAsStmt *ctas)
 {
-	Oid			nspid;
+	Oid nspid;
 	IntoClause *into = ctas->into;
 
 	nspid = RangeVarGetCreationNamespace(into->rel);
@@ -1670,14 +1783,12 @@ CreateTableAsRelExists(CreateTableAsStmt *ctas)
 		if (!ctas->if_not_exists)
 			ereport(ERROR,
 					(errcode(ERRCODE_DUPLICATE_TABLE),
-					 errmsg("relation \"%s\" already exists",
-							into->rel->relname)));
+					 errmsg("relation \"%s\" already exists", into->rel->relname)));
 
 		/* The relation exists and IF NOT EXISTS has been specified */
 		ereport(NOTICE,
 				(errcode(ERRCODE_DUPLICATE_TABLE),
-				 errmsg("relation \"%s\" already exists, skipping",
-						into->rel->relname)));
+				 errmsg("relation \"%s\" already exists, skipping", into->rel->relname)));
 		return true;
 	}
 

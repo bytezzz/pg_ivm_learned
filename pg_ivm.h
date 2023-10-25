@@ -43,7 +43,8 @@ extern ObjectAddress ExecCreateImmv(ParseState *pstate, CreateTableAsStmt *stmt,
 extern void CreateIvmTriggersOnBaseTables(Query *qry, Oid matviewOid);
 extern void CreateIndexOnIMMV(Query *query, Relation matviewRel);
 extern Query *rewriteQueryForIMMV(Query *query, List *colNames);
-extern void makeIvmAggColumn(ParseState *pstate, Aggref *aggref, char *resname, AttrNumber *next_resno, List **aggs);
+extern void makeIvmAggColumn(ParseState *pstate, Aggref *aggref, char *resname,
+							 AttrNumber *next_resno, List **aggs);
 
 /* matview.c */
 
@@ -54,7 +55,7 @@ extern bool ImmvIncrementalMaintenanceIsEnabled(void);
 extern Query *get_immv_query(Relation matviewRel);
 extern Datum IVM_immediate_before(PG_FUNCTION_ARGS);
 extern Datum IVM_immediate_maintenance(PG_FUNCTION_ARGS);
-extern Query* rewrite_query_for_exists_subquery(Query *query);
+extern Query *rewrite_query_for_exists_subquery(Query *query);
 extern Datum ivm_visible_in_prestate(PG_FUNCTION_ARGS);
 extern void AtAbort_IVM(void);
 extern char *getColumnNameStartWith(RangeTblEntry *rte, char *str, int *attnum);
@@ -89,28 +90,35 @@ extern void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 /* Just a Proof of Concept for now, We should design a better structure saving them.*/
 /* Considering to make this a hashmap */
 /* Working in Progress */
-typedef struct QueryTableEntry{
+typedef struct QueryTableEntry
+{
 	char query_string[MAX_QUERY_LENGTH];
 	Oid affected_tables[MAX_AFFECTED_TABLE];
 	TransactionId xid;
 } QueryTableEntry;
 
-typedef struct QueryTable{
+typedef struct QueryTable
+{
 	QueryTableEntry queries[MAX_QUERY_NUM];
 } QueryTable;
 
-
 /* Data Structure saving schedule result, get updated once QueryTable chaned. */
 /* Working in Progress */
-typedef struct ScheduleTable{
+typedef struct ScheduleTable
+{
 	int query_status[MAX_QUERY_NUM];
 } ScheduleTable;
 
 /* Saving all necessary information we need for query scheduling*/
-typedef struct SchedueState{
-
+typedef struct SchedueState
+{
 	int querynum;
-	LWLock *lock;                 // We only need one lock here, since the change to QueryTable will subsequently affect ScheduleTable
+
+	/* We only need one lock here, since the change to QueryTable
+	will subsequently affect ScheduleTable
+	*/
+	LWLock *lock;
+
 	QueryTable queryTable;
 	ScheduleTable scheduleTable;
 
@@ -120,6 +128,6 @@ typedef struct SchedueState{
 
 /* querysched.c */
 
-extern void LogQuery(ScheduleState *state, Query * query, const char* query_string);
+extern void LogQuery(ScheduleState *state, Query *query, const char *query_string);
 
 #endif

@@ -14,50 +14,52 @@ static void LogAffectedTables(Query *qry, ScheduleState *state, int index);
 static void LogTableOid(ScheduleState *state, Oid oid, int index);
 
 void
-LogQuery(ScheduleState *state, Query * query, const char* query_string)
+LogQuery(ScheduleState *state, Query *query, const char *query_string)
 {
-  int index;
-  QueryTableEntry *query_entry;
-  index = state->querynum;
+	int index;
+	QueryTableEntry *query_entry;
+	index = state->querynum;
 
-  if (index == MAX_QUERY_NUM)
-    elog(ERROR, "Too many queries");
+	if (index == MAX_QUERY_NUM)
+		elog(ERROR, "Too many queries");
 
-  state->querynum++;
+	state->querynum++;
 
-  query_entry = &state->queryTable.queries[index];
+	query_entry = &state->queryTable.queries[index];
 
-  strcpy(query_entry->query_string, query_string);
-  query_entry->xid = GetCurrentTransactionId();
+	strcpy(query_entry->query_string, query_string);
+	query_entry->xid = GetCurrentTransactionId();
 
-  elog(INFO, "Logging id: %d, Transactionid: %u, Query: %s",index, query_entry->xid, query_string);
-  LogAffectedTables(query, state, index);
+	elog(INFO,
+		 "Logging id: %d, Transactionid: %u, Query: %s",
+		 index,
+		 query_entry->xid,
+		 query_string);
+	LogAffectedTables(query, state, index);
 
-  Reschedule(state);
+	Reschedule(state);
 }
-
-
 
 /* This function immitate PG_IVM's CreateIvmTriggersOnBaseTables*/
 static void
 LogAffectedTables(Query *qry, ScheduleState *state, int index)
 {
-	Relids	relids = NULL;
-  int i;
+	Relids relids = NULL;
+	int i;
 
 	/* Immediately return if we don't have any base tables. */
 	if (list_length(qry->rtable) < 1)
 		return;
 
-	LogAffectedTablesRecurse(qry, (Node *)qry, state, &relids, index);
+	LogAffectedTablesRecurse(qry, (Node *) qry, state, &relids, index);
 
-  for (i = 0; i < MAX_AFFECTED_TABLE; i++)
-  {
-    if (state->queryTable.queries[index].affected_tables[i] == 0)
-      break;
+	for (i = 0; i < MAX_AFFECTED_TABLE; i++)
+	{
+		if (state->queryTable.queries[index].affected_tables[i] == 0)
+			break;
 
-    elog(INFO, "Affected table: %d", state->queryTable.queries[index].affected_tables[i]);
-  }
+		elog(INFO, "Affected table: %d", state->queryTable.queries[index].affected_tables[i]);
+	}
 
 	bms_free(relids);
 }
@@ -75,57 +77,61 @@ LogAffectedTablesRecurse(Query *qry, Node *node, ScheduleState *state, Relids *r
 	switch (nodeTag(node))
 	{
 		case T_Query:
-			{
-				Query *query = (Query *) node;
-				ListCell *lc;
+		{
+			Query *query = (Query *) node;
+			ListCell *lc;
 
-				LogAffectedTablesRecurse(qry, (Node *)query->jointree, state, relids, index);
-				foreach(lc, query->cteList)
-				{
-					CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
-					Assert(IsA(cte->ctequery, Query));
-					LogAffectedTablesRecurse((Query *) cte->ctequery, cte->ctequery, state, relids, index);
-				}
+			LogAffectedTablesRecurse(qry, (Node *) query->jointree, state, relids, index);
+			foreach (lc, query->cteList)
+			{
+				CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
+				Assert(IsA(cte->ctequery, Query));
+				LogAffectedTablesRecurse((Query *) cte->ctequery,
+										 cte->ctequery,
+										 state,
+										 relids,
+										 index);
 			}
-			break;
+		}
+		break;
 
 		case T_RangeTblRef:
-			{
-				int			rti = ((RangeTblRef *) node)->rtindex;
-				RangeTblEntry *rte = rt_fetch(rti, qry->rtable);
+		{
+			int rti = ((RangeTblRef *) node)->rtindex;
+			RangeTblEntry *rte = rt_fetch(rti, qry->rtable);
 
-				if (rte->rtekind == RTE_RELATION && !bms_is_member(rte->relid, *relids))
-				{
-          LogTableOid(state, rte->relid, index);
-					*relids = bms_add_member(*relids, rte->relid);
-				}
-				else if (rte->rtekind == RTE_SUBQUERY)
-				{
-					Query *subquery = rte->subquery;
-					Assert(rte->subquery != NULL);
-					LogAffectedTablesRecurse(subquery, (Node *)subquery, state, relids, index);
-				}
+			if (rte->rtekind == RTE_RELATION && !bms_is_member(rte->relid, *relids))
+			{
+				LogTableOid(state, rte->relid, index);
+				*relids = bms_add_member(*relids, rte->relid);
 			}
-			break;
+			else if (rte->rtekind == RTE_SUBQUERY)
+			{
+				Query *subquery = rte->subquery;
+				Assert(rte->subquery != NULL);
+				LogAffectedTablesRecurse(subquery, (Node *) subquery, state, relids, index);
+			}
+		}
+		break;
 
 		case T_FromExpr:
-			{
-				FromExpr   *f = (FromExpr *) node;
-				ListCell   *l;
+		{
+			FromExpr *f = (FromExpr *) node;
+			ListCell *l;
 
-				foreach(l, f->fromlist)
-					LogAffectedTablesRecurse(qry, lfirst(l), state, relids, index);
-			}
-			break;
+			foreach (l, f->fromlist)
+				LogAffectedTablesRecurse(qry, lfirst(l), state, relids, index);
+		}
+		break;
 
 		case T_JoinExpr:
-			{
-				JoinExpr   *j = (JoinExpr *) node;
+		{
+			JoinExpr *j = (JoinExpr *) node;
 
-				LogAffectedTablesRecurse(qry, j->larg, state, relids, index);
-				LogAffectedTablesRecurse(qry, j->rarg, state, relids, index);
-			}
-			break;
+			LogAffectedTablesRecurse(qry, j->larg, state, relids, index);
+			LogAffectedTablesRecurse(qry, j->rarg, state, relids, index);
+		}
+		break;
 
 		default:
 			elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
@@ -135,40 +141,40 @@ LogAffectedTablesRecurse(Query *qry, Node *node, ScheduleState *state, Relids *r
 static void
 LogTableOid(ScheduleState *state, Oid oid, int index)
 {
-  int i;
-  QueryTableEntry *query;
+	int i;
+	QueryTableEntry *query;
 
-  query = &state->queryTable.queries[index];
+	query = &state->queryTable.queries[index];
 
-  for (i = 0; i < MAX_AFFECTED_TABLE; i++)
-  {
-    if (query->affected_tables[i] == 0)
-    {
-      query->affected_tables[i] = oid;
-      return;
-    }
-  }
+	for (i = 0; i < MAX_AFFECTED_TABLE; i++)
+	{
+		if (query->affected_tables[i] == 0)
+		{
+			query->affected_tables[i] = oid;
+			return;
+		}
+	}
 
-  elog(ERROR, "Too many affected tables for query: %s", state->queryTable.queries[index].query_string);
+	elog(ERROR,
+		 "Too many affected tables for query: %s",
+		 state->queryTable.queries[index].query_string);
 }
-
-
 
 /* TODO: Implement a heuristic based rescheduling algorithm*/
 static void
 Reschedule(ScheduleState *state)
 {
-  int i;
-  ScheduleTable *scheduleTable;
+	int i;
+	ScheduleTable *scheduleTable;
 
-  scheduleTable = &state->scheduleTable;
+	scheduleTable = &state->scheduleTable;
 
-  if (state->querynum >= 2)
-  {
-    elog(INFO, "Allowing all queries to execute");
-    for (i = 0; i < state->querynum; i++)
-    {
-      scheduleTable->query_status[i] = QUERY_AVAILABLE;
-    }
-  }
+	if (state->querynum >= 2)
+	{
+		elog(INFO, "Allowing all queries to execute");
+		for (i = 0; i < state->querynum; i++)
+		{
+			scheduleTable->query_status[i] = QUERY_AVAILABLE;
+		}
+	}
 }
