@@ -559,7 +559,9 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 
 	if (my_index == -1)
 	{
-		elog(ERROR, "Cannot find query in QueryTable");
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("cannot find query in QueryTable")));
 	}
 
 	LWLockRelease(AddinShmemInitLock);
@@ -605,7 +607,9 @@ pg_hook_execution_finish(QueryDesc *queryDesc)
 
 	if (my_index == -1)
 	{
-		elog(ERROR, "Cannot find query in QueryTable");
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("cannot find query in QueryTable")));
 	}
 
 	memset(&(queryTable->queries[my_index]), 0, sizeof(QueryTableEntry));
