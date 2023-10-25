@@ -20,6 +20,7 @@
 #include "tcop/dest.h"
 #include "utils/queryenvironment.h"
 #include "storage/lwlock.h"
+#include "access/transam.h"
 
 #define Natts_pg_ivm_immv 3
 
@@ -76,25 +77,33 @@ extern void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
  */
 
 #define QUERY_AVAILABLE 1
-#define QUERY_UNAVAILABLE 0
+#define QUERY_BLOCKED 0
 
 /* Configurable parameters */
 #define MAX_QUERY_NUM 100
 #define MAX_QUERY_LENGTH 1000
+#define MAX_TABLE_NUM 50
+#define MAX_AFFECTED_TABLE 50
 
 /* Data Structure for metadata like quries, affected tables, immvs or something else */
 /* Just a Proof of Concept for now, We should design a better structure saving them.*/
 /* Considering to make this a hashmap */
 /* Working in Progress */
+typedef struct QueryTableEntry{
+	char query_string[MAX_QUERY_LENGTH];
+	Oid affected_tables[MAX_AFFECTED_TABLE];
+	TransactionId xid;
+} QueryTableEntry;
+
 typedef struct QueryTable{
-  char queries[MAX_QUERY_NUM][MAX_QUERY_LENGTH];
+	QueryTableEntry queries[MAX_QUERY_NUM];
 } QueryTable;
 
 
 /* Data Structure saving schedule result, get updated once QueryTable chaned. */
 /* Working in Progress */
 typedef struct ScheduleTable{
-	int schedule_result[MAX_QUERY_NUM];
+	int query_status[MAX_QUERY_NUM];
 } ScheduleTable;
 
 /* Saving all necessary information we need for query scheduling*/
@@ -111,6 +120,6 @@ typedef struct SchedueState{
 
 /* querysched.c */
 
-extern void InsertQuery(ScheduleState *state, const char *query);
+extern void LogQuery(ScheduleState *state, Query * query, const char* query_string);
 
 #endif

@@ -503,7 +503,7 @@ static PlannedStmt *pg_hook_planner(Query *parse, const char *query_string, int 
 {
   LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
-	InsertQuery(schedule_state, query_string);
+	LogQuery(schedule_state, parse, query_string);
 
 	LWLockRelease(AddinShmemInitLock);
 
@@ -521,9 +521,49 @@ static PlannedStmt *pg_hook_planner(Query *parse, const char *query_string, int 
 void
 pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 {
-  LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
-	elog(INFO, "pg_hook_execution_start");
+	/* We only need to read the schedule result. */
+	int i, my_index, status;
+	TransactionId xid;
+	QueryTable *queryTable = &(schedule_state->queryTable);
+
+	xid = GetCurrentTransactionId();
+	status = false;
+	my_index = -1;
+
+
+  LWLockAcquire(AddinShmemInitLock, LW_SHARED);
+
+	for (i = 0; i < MAX_QUERY_NUM; i++)
+	{
+		if (queryTable->queries[i].xid == xid)
+		{
+			my_index = i;
+			break;
+		}
+	}
+
+	if (my_index == -1)
+	{
+		elog(ERROR, "Cannot find query in QueryTable");
+	}
+
 	LWLockRelease(AddinShmemInitLock);
+
+
+	/* We need to switch this into a semaphore implementation */
+	/* Uneffective */
+	for(;;)
+	{
+		LWLockAcquire(AddinShmemInitLock, LW_SHARED);
+		status = schedule_state->scheduleTable.query_status[my_index];
+		LWLockRelease(AddinShmemInitLock);
+
+		if (status == QUERY_AVAILABLE)
+			break;
+
+		pg_usleep(200);
+	}
+	elog(INFO, "Got execution lock on %d", i);
 
 	if (PrevExecutionStartHook)
 		PrevExecutionStartHook(queryDesc, eflags);
