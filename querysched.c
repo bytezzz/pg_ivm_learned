@@ -18,10 +18,15 @@ LogQuery(ScheduleState *state, Query *query, const char *query_string)
 {
 	int index;
 	QueryTableEntry *query_entry;
-	index = state->querynum;
 
-	if (index == MAX_QUERY_NUM)
-		elog(ERROR, "Too many queries");
+	for (index = 0; index < MAX_QUERY_NUM; index++)
+	{
+		if (state->queryTable.queries[index].xid == 0)
+			break;
+	}
+
+	if (index == MAX_QUERY_NUM - 1)
+		ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Too many queries in the system")));
 
 	state->querynum++;
 

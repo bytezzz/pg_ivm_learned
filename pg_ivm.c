@@ -49,6 +49,7 @@ static shmem_request_hook_type PrevShmemRequestHook = NULL;
 static shmem_startup_hook_type PrevShmemStartupHook = NULL;
 static planner_hook_type PrevPlanHook = NULL;
 static ExecutorStart_hook_type PrevExecutionStartHook = NULL;
+static ExecutorFinish_hook_type PrevExecutionFinishHook = NULL;
 
 static ScheduleState *schedule_state = NULL;
 
@@ -67,6 +68,7 @@ static void pg_hook_shmem_startup(void);
 static PlannedStmt *pg_hook_planner(Query *parse, const char *query_string, int cursor_options,
 									ParamListInfo bound_params);
 void pg_hook_execution_start(QueryDesc *queryDesc, int eflags);
+void pg_hook_execution_finish(QueryDesc *queryDesc);
 
 /* SQL callable functions */
 PG_FUNCTION_INFO_V1(create_immv);
@@ -115,6 +117,9 @@ _PG_init(void)
 
 	PrevExecutionStartHook = ExecutorStart_hook;
 	ExecutorStart_hook = pg_hook_execution_start;
+
+	PrevExecutionFinishHook = ExecutorFinish_hook;
+	ExecutorFinish_hook = pg_hook_execution_finish;
 }
 
 /*
@@ -534,8 +539,9 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 	/* We only need to read the schedule result. */
 	int i, my_index, status;
 	TransactionId xid;
-	QueryTable *queryTable = &(schedule_state->queryTable);
+	QueryTable *queryTable;
 
+	queryTable = &(schedule_state->queryTable);
 	xid = GetCurrentTransactionId();
 	status = false;
 	my_index = -1;
@@ -577,4 +583,41 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 		PrevExecutionStartHook(queryDesc, eflags);
 	else
 		standard_ExecutorStart(queryDesc, eflags);
+}
+
+void
+pg_hook_execution_finish(QueryDesc *queryDesc)
+{
+	int i, my_index = -1;
+	TransactionId xid = GetCurrentTransactionId();
+	QueryTable *queryTable = &(schedule_state->queryTable);
+
+	LWLockAcquire(AddinShmemInitLock, LW_SHARED);
+
+	for (i = 0; i < MAX_QUERY_NUM; i++)
+	{
+		if (queryTable->queries[i].xid == xid)
+		{
+			my_index = i;
+			break;
+		}
+	}
+
+	if (my_index == -1)
+	{
+		elog(ERROR, "Cannot find query in QueryTable");
+	}
+
+	memset(&(queryTable->queries[my_index]), 0, sizeof(QueryTableEntry));
+
+	schedule_state->querynum--;
+
+	LWLockRelease(AddinShmemInitLock);
+
+	elog(INFO, "Destroied query structure on %d", i);
+
+	if (PrevExecutionFinishHook)
+		PrevExecutionFinishHook(queryDesc);
+	else
+		standard_ExecutorFinish(queryDesc);
 }
