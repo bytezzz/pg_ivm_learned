@@ -544,7 +544,7 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 	for (;;)
 	{
 		LWLockAcquire(schedule_state->lock, LW_SHARED);
-		status = schedule_state->scheduleTable.query_status[my_index];
+		status = schedule_state->query_status[my_index];
 		LWLockRelease(schedule_state->lock);
 
 		if (status == QUERY_AVAILABLE)
@@ -572,7 +572,7 @@ pg_hook_execution_finish(QueryDesc *queryDesc)
 
 	for (index = 0; index < MAX_QUERY_NUM; index++)
 	{
-		query = &schedule_state->queryTable.queries[index];
+		query = &schedule_state->queryTable[index];
 		if (queryDesc->plannedstmt->queryId == query->queryId)
 		{
 			my_index = index;
@@ -594,14 +594,14 @@ pg_hook_execution_finish(QueryDesc *queryDesc)
 		 "Query:%s Finished!. Removing query no: %d, prevQid %ld, myPid is: %d",
 		 queryDesc->sourceText,
 		 my_index,
-		 schedule_state->queryTable.queries[my_index].queryId,
+		 schedule_state->queryTable[my_index].queryId,
 		 MyProcPid);
 
-	if (MyProcPid == schedule_state->queryTable.queries[my_index].procId)
+	if (MyProcPid == schedule_state->queryTable[my_index].procId)
 	{
-		memset(&schedule_state->queryTable.queries[my_index], 0, sizeof(QueryTableEntry));
+		memset(&schedule_state->queryTable[my_index], 0, sizeof(QueryTableEntry));
+		schedule_state->query_status[my_index] = QUERY_BLOCKED;
 		schedule_state->querynum--;
-		Reschedule(schedule_state);
 	}
 
 	LWLockRelease(schedule_state->lock);

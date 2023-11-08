@@ -89,6 +89,8 @@ extern void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 #define MAX_TABLE_NUM 500
 #define MAX_AFFECTED_TABLE 500
 
+#define MAX_CONCURRENT_QUERY 10000
+
 /* Data Structure for metadata like quries, affected tables, immvs or something else */
 /* Just a Proof of Concept for now, We should design a better structure saving them.*/
 /* Considering to make this a hashmap */
@@ -102,17 +104,6 @@ typedef struct QueryTableEntry
 	TransactionId xid;
 } QueryTableEntry;
 
-typedef struct QueryTable
-{
-	QueryTableEntry queries[MAX_QUERY_NUM];
-} QueryTable;
-
-/* Data Structure saving schedule result, get updated once QueryTable chaned. */
-/* Working in Progress */
-typedef struct ScheduleTable
-{
-	int query_status[MAX_QUERY_NUM];
-} ScheduleTable;
 
 /* Saving all necessary information we need for query scheduling*/
 typedef struct SchedueState
@@ -120,13 +111,13 @@ typedef struct SchedueState
 	int querynum;
 	int runningQuery;
 
-	/* We only need one lock here, since the change to QueryTable
+		/* We only need one lock here, since the change to QueryTable
 	will subsequently affect ScheduleTable
 	*/
 	LWLock *lock;
 
-	QueryTable queryTable;
-	ScheduleTable scheduleTable;
+	QueryTableEntry queryTable[MAX_QUERY_NUM];
+	int query_status[MAX_QUERY_NUM];
 
 } ScheduleState;
 

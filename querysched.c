@@ -25,7 +25,7 @@ LogQuery(ScheduleState *state, PlannedStmt *query, const char *query_string)
 
 	for (index = 0; index < MAX_QUERY_NUM; index++)
 	{
-		if (state->queryTable.queries[index].xid == 0)
+		if (state->queryTable[index].xid == 0)
 			break;
 	}
 
@@ -34,7 +34,7 @@ LogQuery(ScheduleState *state, PlannedStmt *query, const char *query_string)
 
 	state->querynum++;
 
-	query_entry = &state->queryTable.queries[index];
+	query_entry = &state->queryTable[index];
 
 	strcpy(query_entry->query_string, query_string);
 	query_entry->xid = GetCurrentTransactionId();
@@ -56,7 +56,7 @@ LogQuery(ScheduleState *state, PlannedStmt *query, const char *query_string)
 		if (oidIndex > MAX_AFFECTED_TABLE){
 			elog(ERROR,
 				"Too many affected tables for query: %s",
-				state->queryTable.queries[index].query_string);
+				state->queryTable[index].query_string);
 		}
 		query_entry->affected_tables[oidIndex++] = lfirst_oid(roid);
 		elog(IVM_LOG_LEVEL, "Logging affected table: %d", lfirst_oid(roid));
@@ -67,48 +67,18 @@ LogQuery(ScheduleState *state, PlannedStmt *query, const char *query_string)
 
 /* TODO: Implement a heuristic based rescheduling algorithm*/
 void
-Reschedule(ScheduleState *state)
-{
-	int i, j, k;
-	ScheduleTable *scheduleTable;
+Reschedule(ScheduleState *state){
 
-	scheduleTable = &state->scheduleTable;
-	ReferedTable tables[100];
+	int i;
 
 	for (i = 0; i < MAX_QUERY_NUM; i++)
 	{
-		if (state->queryTable.queries[i].xid == 0)
+		if (state->queryTable[i].xid == 0)
 			continue;
 
-		for (j = 0; j < MAX_AFFECTED_TABLE; j++)
-		{
-			if (state->queryTable.queries[i].affected_tables[j] == 0)
-				break;
-
-			for (k = 0; k < 100; k++)
-			{
-				if (tables[k].oid == state->queryTable.queries[i].affected_tables[j])
-				{
-					tables[k].count++;
-					break;
-				}
-				if (tables[k].oid == 0)
-				{
-					tables[k].oid = state->queryTable.queries[i].affected_tables[j];
-					tables[k].count = 1;
-					break;
-				}
-			}
-		}
+		state->query_status[i] = QUERY_AVAILABLE;
 	}
-	for (i = 0; i < MAX_QUERY_NUM; i++)
-	{
-		if (state->queryTable.queries[i].xid == 0)
-			continue;
-
-		state->scheduleTable.query_status[i] = QUERY_AVAILABLE;
-	}
-
-
 
 }
+
+
