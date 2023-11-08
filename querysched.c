@@ -41,7 +41,6 @@ LogQuery(ScheduleState *state, Query *query, const char *query_string)
 		 query_string);
 	LogAffectedTables(query, state, index);
 
-	Reschedule(state);
 	return index;
 }
 

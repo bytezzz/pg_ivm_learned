@@ -532,6 +532,8 @@ pg_hook_planner(Query *parse, const char *query_string, int cursor_options,
 
 		my_index = LogQuery(schedule_state, parse, query_string);
 
+		Reschedule(schedule_state);
+
 		LWLockRelease(schedule_state->lock);
 
 		for (;;)
@@ -553,6 +555,8 @@ pg_hook_planner(Query *parse, const char *query_string, int cursor_options,
 			 schedule_state->queryTable.queries[my_index].xid);
 		memset(&schedule_state->queryTable.queries[my_index], 0, sizeof(QueryTableEntry));
 		schedule_state->querynum--;
+
+		Reschedule(schedule_state);
 	}
 
 	if (PrevPlanHook)
