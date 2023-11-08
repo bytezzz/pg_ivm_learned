@@ -22,6 +22,7 @@
 #include "storage/lwlock.h"
 #include "access/transam.h"
 #include "utils/elog.h"
+#include "nodes/plannodes.h"
 
 #define Natts_pg_ivm_immv 3
 
@@ -96,6 +97,8 @@ typedef struct QueryTableEntry
 {
 	char query_string[MAX_QUERY_LENGTH];
 	Oid affected_tables[MAX_AFFECTED_TABLE];
+	int procId;
+	uint64 queryId;
 	TransactionId xid;
 } QueryTableEntry;
 
@@ -115,6 +118,7 @@ typedef struct ScheduleTable
 typedef struct SchedueState
 {
 	int querynum;
+	int runningQuery;
 
 	/* We only need one lock here, since the change to QueryTable
 	will subsequently affect ScheduleTable
@@ -130,7 +134,7 @@ typedef struct SchedueState
 
 /* querysched.c */
 
-extern int LogQuery(ScheduleState *state, Query *query, const char *query_string);
+extern int LogQuery(ScheduleState *state, PlannedStmt *query, const char *query_string);
 extern void Reschedule(ScheduleState *state);
 
 #endif

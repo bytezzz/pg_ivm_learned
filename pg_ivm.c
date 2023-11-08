@@ -100,6 +100,7 @@ IvmSubXactCallback(SubXactEvent event, SubTransactionId mySubid, SubTransactionI
 void
 _PG_init(void)
 {
+	EnableQueryId();
 	elog(LOG, "Initializing PG_LEARNED_IVM");
 	RegisterXactCallback(IvmXactCallback, NULL);
 	RegisterSubXactCallback(IvmSubXactCallback, NULL);
@@ -518,47 +519,10 @@ pg_hook_shmem_startup(void)
 	LWLockRelease(AddinShmemInitLock);
 }
 
-/* Install Hook after planner, we insert query into QueryTable then trigger rescheduling. */
 static PlannedStmt *
 pg_hook_planner(Query *parse, const char *query_string, int cursor_options,
 				ParamListInfo bound_params)
 {
-	int my_index, status;
-
-	if (parse->commandType == CMD_INSERT || parse->commandType == CMD_UPDATE ||
-		parse->commandType == CMD_DELETE || parse->commandType == CMD_SELECT)
-	{
-		LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
-
-		my_index = LogQuery(schedule_state, parse, query_string);
-
-		Reschedule(schedule_state);
-
-		LWLockRelease(schedule_state->lock);
-
-		for (;;)
-		{
-			LWLockAcquire(schedule_state->lock, LW_SHARED);
-			status = schedule_state->scheduleTable.query_status[my_index];
-			LWLockRelease(schedule_state->lock);
-
-			if (status == QUERY_AVAILABLE)
-				break;
-
-			pg_usleep(200);
-		}
-		elog(DEBUG1, "Got execution lock on %d", my_index);
-
-		elog(IVM_LOG_LEVEL,
-			 "Removing query: %d, prev xid: %d",
-			 my_index,
-			 schedule_state->queryTable.queries[my_index].xid);
-		memset(&schedule_state->queryTable.queries[my_index], 0, sizeof(QueryTableEntry));
-		schedule_state->querynum--;
-
-		Reschedule(schedule_state);
-	}
-
 	if (PrevPlanHook)
 		return PrevPlanHook(parse, query_string, cursor_options, bound_params);
 
@@ -568,6 +532,29 @@ pg_hook_planner(Query *parse, const char *query_string, int cursor_options,
 void
 pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 {
+	int my_index, status;
+	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
+
+	my_index = LogQuery(schedule_state, queryDesc->plannedstmt, queryDesc->sourceText);
+
+	Reschedule(schedule_state);
+
+	LWLockRelease(schedule_state->lock);
+
+	for (;;)
+	{
+		LWLockAcquire(schedule_state->lock, LW_SHARED);
+		status = schedule_state->scheduleTable.query_status[my_index];
+		LWLockRelease(schedule_state->lock);
+
+		if (status == QUERY_AVAILABLE)
+			break;
+
+		pg_usleep(30);
+	}
+
+	elog(IVM_LOG_LEVEL, "Got execution lock on %d", my_index);
+
 	if (PrevExecutionStartHook)
 		PrevExecutionStartHook(queryDesc, eflags);
 	else
@@ -577,6 +564,48 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 void
 pg_hook_execution_finish(QueryDesc *queryDesc)
 {
+	int index, my_index;
+	QueryTableEntry *query;
+	my_index = -1;
+
+	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
+
+	for (index = 0; index < MAX_QUERY_NUM; index++)
+	{
+		query = &schedule_state->queryTable.queries[index];
+		if (queryDesc->plannedstmt->queryId == query->queryId)
+		{
+			my_index = index;
+			break;
+		}
+	}
+
+	if (my_index == -1)
+	{
+		LWLockRelease(schedule_state->lock);
+		elog(ERROR,
+			 "I cant found query %s in QueryTable, queryId: %ld, myPid is: %d",
+			 queryDesc->sourceText,
+			 queryDesc->plannedstmt->queryId,
+			 MyProcPid);
+	}
+
+	elog(IVM_LOG_LEVEL,
+		 "Query:%s Finished!. Removing query no: %d, prevQid %ld, myPid is: %d",
+		 queryDesc->sourceText,
+		 my_index,
+		 schedule_state->queryTable.queries[my_index].queryId,
+		 MyProcPid);
+
+	if (MyProcPid == schedule_state->queryTable.queries[my_index].procId)
+	{
+		memset(&schedule_state->queryTable.queries[my_index], 0, sizeof(QueryTableEntry));
+		schedule_state->querynum--;
+		Reschedule(schedule_state);
+	}
+
+	LWLockRelease(schedule_state->lock);
+
 	if (PrevExecutionFinishHook)
 		PrevExecutionFinishHook(queryDesc);
 	else
