@@ -21,6 +21,7 @@
 #include "utils/queryenvironment.h"
 #include "storage/lwlock.h"
 #include "access/transam.h"
+#include "utils/elog.h"
 
 #define Natts_pg_ivm_immv 3
 
@@ -28,6 +29,7 @@
 #define Anum_pg_ivm_immv_viewdef 2
 #define Anum_pg_ivm_immv_ispopulated 3
 
+#define IVM_LOG_LEVEL DEBUG1
 /* pg_ivm.c */
 
 extern void CreateChangePreventTrigger(Oid matviewOid);
@@ -81,10 +83,10 @@ extern void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 #define QUERY_BLOCKED 0
 
 /* Configurable parameters */
-#define MAX_QUERY_NUM 100
-#define MAX_QUERY_LENGTH 1000
-#define MAX_TABLE_NUM 50
-#define MAX_AFFECTED_TABLE 50
+#define MAX_QUERY_NUM 100000
+#define MAX_QUERY_LENGTH 10000
+#define MAX_TABLE_NUM 500
+#define MAX_AFFECTED_TABLE 500
 
 /* Data Structure for metadata like quries, affected tables, immvs or something else */
 /* Just a Proof of Concept for now, We should design a better structure saving them.*/
@@ -128,7 +130,7 @@ typedef struct SchedueState
 
 /* querysched.c */
 
-extern void LogQuery(ScheduleState *state, Query *query, const char *query_string);
+extern int LogQuery(ScheduleState *state, Query *query, const char *query_string);
 extern void Reschedule(ScheduleState *state);
 
 #endif

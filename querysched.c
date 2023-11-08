@@ -12,7 +12,7 @@ static void LogAffectedTablesRecurse(Query *, Node *, ScheduleState *, Relids *,
 static void LogAffectedTables(Query *qry, ScheduleState *state, int index);
 static void LogTableOid(ScheduleState *state, Oid oid, int index);
 
-void
+int
 LogQuery(ScheduleState *state, Query *query, const char *query_string)
 {
 	int index;
@@ -34,7 +34,7 @@ LogQuery(ScheduleState *state, Query *query, const char *query_string)
 	strcpy(query_entry->query_string, query_string);
 	query_entry->xid = GetCurrentTransactionId();
 
-	elog(INFO,
+	elog(IVM_LOG_LEVEL,
 		 "Logging id: %d, Transactionid: %u, Query: %s",
 		 index,
 		 query_entry->xid,
@@ -42,6 +42,7 @@ LogQuery(ScheduleState *state, Query *query, const char *query_string)
 	LogAffectedTables(query, state, index);
 
 	Reschedule(state);
+	return index;
 }
 
 /* This function immitate PG_IVM's CreateIvmTriggersOnBaseTables*/
@@ -62,7 +63,9 @@ LogAffectedTables(Query *qry, ScheduleState *state, int index)
 		if (state->queryTable.queries[index].affected_tables[i] == 0)
 			break;
 
-		elog(INFO, "Affected table: %d", state->queryTable.queries[index].affected_tables[i]);
+		elog(IVM_LOG_LEVEL,
+			 "Affected table: %d",
+			 state->queryTable.queries[index].affected_tables[i]);
 	}
 
 	bms_free(relids);
@@ -180,6 +183,6 @@ Reschedule(ScheduleState *state)
 
 		scheduleTable->query_status[i] = QUERY_AVAILABLE;
 
-		elog(INFO, "Allowing query: %d", i);
+		elog(IVM_LOG_LEVEL, "Allowing query: %d", i);
 	}
 }

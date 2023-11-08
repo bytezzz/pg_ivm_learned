@@ -100,6 +100,7 @@ IvmSubXactCallback(SubXactEvent event, SubTransactionId mySubid, SubTransactionI
 void
 _PG_init(void)
 {
+	elog(LOG, "Initializing PG_LEARNED_IVM");
 	RegisterXactCallback(IvmXactCallback, NULL);
 	RegisterSubXactCallback(IvmSubXactCallback, NULL);
 
@@ -428,10 +429,16 @@ PgIvmObjectAccessHook(ObjectAccessType access, Oid classId, Oid objectId, int su
 
 	if (access == OAT_DROP && classId == RelationRelationId && !OidIsValid(subId))
 	{
-		Relation pgIvmImmv = table_open(PgIvmImmvRelationId(), AccessShareLock);
+		Relation pgIvmImmv;
 		SysScanDesc scan;
 		ScanKeyData key;
 		HeapTuple tup;
+		Oid pgIvmImmvOid = PgIvmImmvRelationId();
+
+		if (pgIvmImmvOid == InvalidOid)
+			return;
+
+		pgIvmImmv = table_open(pgIvmImmvOid, AccessShareLock);
 
 		ScanKeyInit(&key,
 					Anum_pg_ivm_immv_immvrelid,
@@ -516,11 +523,37 @@ static PlannedStmt *
 pg_hook_planner(Query *parse, const char *query_string, int cursor_options,
 				ParamListInfo bound_params)
 {
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	int my_index, status;
 
-	LogQuery(schedule_state, parse, query_string);
+	if (parse->commandType == CMD_INSERT || parse->commandType == CMD_UPDATE ||
+		parse->commandType == CMD_DELETE || parse->commandType == CMD_SELECT)
+	{
+		LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
 
-	LWLockRelease(AddinShmemInitLock);
+		my_index = LogQuery(schedule_state, parse, query_string);
+
+		LWLockRelease(schedule_state->lock);
+
+		for (;;)
+		{
+			LWLockAcquire(schedule_state->lock, LW_SHARED);
+			status = schedule_state->scheduleTable.query_status[my_index];
+			LWLockRelease(schedule_state->lock);
+
+			if (status == QUERY_AVAILABLE)
+				break;
+
+			pg_usleep(200);
+		}
+		elog(DEBUG1, "Got execution lock on %d", my_index);
+
+		elog(IVM_LOG_LEVEL,
+			 "Removing query: %d, prev xid: %d",
+			 my_index,
+			 schedule_state->queryTable.queries[my_index].xid);
+		memset(&schedule_state->queryTable.queries[my_index], 0, sizeof(QueryTableEntry));
+		schedule_state->querynum--;
+	}
 
 	if (PrevPlanHook)
 		return PrevPlanHook(parse, query_string, cursor_options, bound_params);
@@ -528,59 +561,9 @@ pg_hook_planner(Query *parse, const char *query_string, int cursor_options,
 	return standard_planner(parse, query_string, cursor_options, bound_params);
 }
 
-/* Hook before query plan being executed, We need to check our scheduling results
- * and then decide whether to execute the query or not.
- * Use semaphore to synchronize with scheduler.
- * Working in Progress.
- */
 void
 pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 {
-	/* We only need to read the schedule result. */
-	int i, my_index, status;
-	TransactionId xid;
-	QueryTable *queryTable;
-
-	queryTable = &(schedule_state->queryTable);
-	xid = GetCurrentTransactionId();
-	status = false;
-	my_index = -1;
-
-	LWLockAcquire(AddinShmemInitLock, LW_SHARED);
-
-	for (i = 0; i < MAX_QUERY_NUM; i++)
-	{
-		if (queryTable->queries[i].xid == xid)
-		{
-			my_index = i;
-			break;
-		}
-	}
-
-	if (my_index == -1)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("cannot find query in QueryTable")));
-	}
-
-	LWLockRelease(AddinShmemInitLock);
-
-	/* We need to switch this into a semaphore implementation */
-	/* Uneffective */
-	for (;;)
-	{
-		LWLockAcquire(AddinShmemInitLock, LW_SHARED);
-		status = schedule_state->scheduleTable.query_status[my_index];
-		LWLockRelease(AddinShmemInitLock);
-
-		if (status == QUERY_AVAILABLE)
-			break;
-
-		pg_usleep(200);
-	}
-	elog(INFO, "Got execution lock on %d", i);
-
 	if (PrevExecutionStartHook)
 		PrevExecutionStartHook(queryDesc, eflags);
 	else
@@ -590,38 +573,6 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 void
 pg_hook_execution_finish(QueryDesc *queryDesc)
 {
-	int i, my_index = -1;
-	TransactionId xid = GetCurrentTransactionId();
-	QueryTable *queryTable = &(schedule_state->queryTable);
-
-	LWLockAcquire(AddinShmemInitLock, LW_SHARED);
-
-	for (i = 0; i < MAX_QUERY_NUM; i++)
-	{
-		if (queryTable->queries[i].xid == xid)
-		{
-			my_index = i;
-			break;
-		}
-	}
-
-	if (my_index == -1)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("cannot find query in QueryTable")));
-	}
-
-	memset(&(queryTable->queries[my_index]), 0, sizeof(QueryTableEntry));
-
-	schedule_state->querynum--;
-
-	Reschedule(schedule_state);
-
-	LWLockRelease(AddinShmemInitLock);
-
-	elog(INFO, "Destroied query structure on %d", i);
-
 	if (PrevExecutionFinishHook)
 		PrevExecutionFinishHook(queryDesc);
 	else
