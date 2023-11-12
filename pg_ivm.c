@@ -36,8 +36,11 @@
 #include "optimizer/planner.h"
 #include "executor/execdesc.h"
 #include "executor/executor.h"
+#include "access/parallel.h"
 
 #include "pg_ivm.h"
+
+#define enable_enforce(level) (!IsParallelWorker() && (level) == 0)
 
 PG_MODULE_MAGIC;
 
@@ -50,8 +53,12 @@ static shmem_startup_hook_type PrevShmemStartupHook = NULL;
 static planner_hook_type PrevPlanHook = NULL;
 static ExecutorStart_hook_type PrevExecutionStartHook = NULL;
 static ExecutorFinish_hook_type PrevExecutionFinishHook = NULL;
+static ExecutorRun_hook_type prevExecutorRunHook = NULL;
 
 static ScheduleState *schedule_state = NULL;
+static HTAB *queryHashTable = NULL;
+
+static int nesting_level = 0;
 
 void _PG_init(void);
 
@@ -68,6 +75,8 @@ static void pg_hook_shmem_startup(void);
 static PlannedStmt *pg_hook_planner(Query *parse, const char *query_string, int cursor_options,
 									ParamListInfo bound_params);
 void pg_hook_execution_start(QueryDesc *queryDesc, int eflags);
+void pg_hook_executor_run(QueryDesc *queryDesc, ScanDirection direction, uint64 count,
+						  bool execute_once);
 void pg_hook_execution_finish(QueryDesc *queryDesc);
 
 /* SQL callable functions */
@@ -119,6 +128,9 @@ _PG_init(void)
 
 	PrevExecutionStartHook = ExecutorStart_hook;
 	ExecutorStart_hook = pg_hook_execution_start;
+
+	prevExecutorRunHook = ExecutorRun_hook;
+	ExecutorRun_hook = pg_hook_executor_run;
 
 	PrevExecutionFinishHook = ExecutorFinish_hook;
 	ExecutorFinish_hook = pg_hook_execution_finish;
@@ -494,17 +506,25 @@ pg_hook_shmem_request(void)
 	if (PrevShmemRequestHook)
 		PrevShmemRequestHook();
 
-	RequestAddinShmemSpace(SEGMENT_SIZE);
+	RequestAddinShmemSpace(SEGMENT_SIZE + HASH_TABLE_SIZE);
 	RequestNamedLWLockTranche("pg_hook", 1);
 }
 
 static void
 pg_hook_shmem_startup(void)
 {
+	HASHCTL info;
 	bool found = false;
 
 	if (PrevShmemStartupHook)
 		PrevShmemStartupHook();
+
+	memset(&info, 0, sizeof(info));
+	info.keysize = MAX_QUERY_LENGTH;
+	info.entrysize = sizeof(QueryTableEntry);
+
+	queryHashTable =
+		ShmemInitHash("QueryTable", MAX_QUERY_NUM, MAX_QUERY_NUM, &info, HASH_ELEM | HASH_STRINGS);
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
@@ -532,19 +552,32 @@ pg_hook_planner(Query *parse, const char *query_string, int cursor_options,
 void
 pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 {
-	int my_index, status;
+	int status;
+	QueryTableEntry *query_entry;
+
+	if (PrevExecutionStartHook)
+		PrevExecutionStartHook(queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
+
+	if (strcmp(queryDesc->sourceText, "") == 0 ||
+		(eflags & (EXEC_FLAG_EXPLAIN_GENERIC | EXEC_FLAG_EXPLAIN_ONLY)) ||
+		!enable_enforce(nesting_level))
+		return;
+
 	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
 
-	my_index = LogQuery(schedule_state, queryDesc->plannedstmt, queryDesc->sourceText);
+	query_entry =
+		LogQuery(queryHashTable, schedule_state, queryDesc->plannedstmt, queryDesc->sourceText);
 
-	Reschedule(schedule_state);
+	Reschedule(queryHashTable, schedule_state);
 
 	LWLockRelease(schedule_state->lock);
 
 	for (;;)
 	{
 		LWLockAcquire(schedule_state->lock, LW_SHARED);
-		status = schedule_state->query_status[my_index];
+		status = query_entry->status;
 		LWLockRelease(schedule_state->lock);
 
 		if (status == QUERY_AVAILABLE)
@@ -552,60 +585,36 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 
 		pg_usleep(30);
 	}
+}
 
-	elog(IVM_LOG_LEVEL, "Got execution lock on %d", my_index);
+void
+pg_hook_executor_run(QueryDesc *queryDesc, ScanDirection direction, uint64 count, bool execute_once)
+{
+	nesting_level++;
+	PG_TRY();
+	{
+		if (prevExecutorRunHook)
+			prevExecutorRunHook(queryDesc, direction, count, execute_once);
+		else
+			standard_ExecutorRun(queryDesc, direction, count, execute_once);
+	}
+	PG_CATCH();
+	{
+		nesting_level--;
+		if (enable_enforce(nesting_level))
+			RemoveLoggedQuery(queryDesc, queryHashTable, schedule_state);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
-	if (PrevExecutionStartHook)
-		PrevExecutionStartHook(queryDesc, eflags);
-	else
-		standard_ExecutorStart(queryDesc, eflags);
+	nesting_level--;
+	if (enable_enforce(nesting_level))
+		RemoveLoggedQuery(queryDesc, queryHashTable, schedule_state);
 }
 
 void
 pg_hook_execution_finish(QueryDesc *queryDesc)
 {
-	int index, my_index;
-	QueryTableEntry *query;
-	my_index = -1;
-
-	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
-
-	for (index = 0; index < MAX_QUERY_NUM; index++)
-	{
-		query = &schedule_state->queryTable[index];
-		if (queryDesc->plannedstmt->queryId == query->queryId)
-		{
-			my_index = index;
-			break;
-		}
-	}
-
-	if (my_index == -1)
-	{
-		LWLockRelease(schedule_state->lock);
-		elog(ERROR,
-			 "I cant found query %s in QueryTable, queryId: %ld, myPid is: %d",
-			 queryDesc->sourceText,
-			 queryDesc->plannedstmt->queryId,
-			 MyProcPid);
-	}
-
-	elog(IVM_LOG_LEVEL,
-		 "Query:%s Finished!. Removing query no: %d, prevQid %ld, myPid is: %d",
-		 queryDesc->sourceText,
-		 my_index,
-		 schedule_state->queryTable[my_index].queryId,
-		 MyProcPid);
-
-	if (MyProcPid == schedule_state->queryTable[my_index].procId)
-	{
-		memset(&schedule_state->queryTable[my_index], 0, sizeof(QueryTableEntry));
-		schedule_state->query_status[my_index] = QUERY_BLOCKED;
-		schedule_state->querynum--;
-	}
-
-	LWLockRelease(schedule_state->lock);
-
 	if (PrevExecutionFinishHook)
 		PrevExecutionFinishHook(queryDesc);
 	else

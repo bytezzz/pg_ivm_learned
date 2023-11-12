@@ -23,6 +23,8 @@
 #include "access/transam.h"
 #include "utils/elog.h"
 #include "nodes/plannodes.h"
+#include "utils/hsearch.h"
+#include "executor/execdesc.h"
 
 #define Natts_pg_ivm_immv 3
 
@@ -84,12 +86,14 @@ extern void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 #define QUERY_BLOCKED 0
 
 /* Configurable parameters */
-#define MAX_QUERY_NUM 100000
-#define MAX_QUERY_LENGTH 10000
+#define MAX_QUERY_NUM 1000
+#define MAX_QUERY_LENGTH ((Size) 10240)
 #define MAX_TABLE_NUM 500
 #define MAX_AFFECTED_TABLE 500
 
 #define MAX_CONCURRENT_QUERY 10000
+
+#define HASH_TABLE_SIZE (MAX_QUERY_NUM * sizeof(QueryTableEntry))
 
 /* Data Structure for metadata like quries, affected tables, immvs or something else */
 /* Just a Proof of Concept for now, We should design a better structure saving them.*/
@@ -101,9 +105,9 @@ typedef struct QueryTableEntry
 	Oid affected_tables[MAX_AFFECTED_TABLE];
 	int procId;
 	uint64 queryId;
+	int status;
 	TransactionId xid;
 } QueryTableEntry;
-
 
 /* Saving all necessary information we need for query scheduling*/
 typedef struct SchedueState
@@ -111,12 +115,10 @@ typedef struct SchedueState
 	int querynum;
 	int runningQuery;
 
-		/* We only need one lock here, since the change to QueryTable
-	will subsequently affect ScheduleTable
+	/* We only need one lock here, since the change to QueryTable
+				will subsequently affect ScheduleTable
 	*/
 	LWLock *lock;
-
-	QueryTableEntry queryTable[MAX_QUERY_NUM];
 	int query_status[MAX_QUERY_NUM];
 
 } ScheduleState;
@@ -125,7 +127,10 @@ typedef struct SchedueState
 
 /* querysched.c */
 
-extern int LogQuery(ScheduleState *state, PlannedStmt *query, const char *query_string);
-extern void Reschedule(ScheduleState *state);
+extern QueryTableEntry *LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *query,
+								 const char *query_string);
+extern void Reschedule(HTAB *queryTable, ScheduleState *state);
+extern void RemoveLoggedQuery(QueryDesc *queryDesc, HTAB *queryHashTable,
+							  ScheduleState *schedule_state);
 
 #endif

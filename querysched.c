@@ -16,34 +16,40 @@ typedef struct ReferedTable
 	int count;
 } ReferedTable;
 
-int
-LogQuery(ScheduleState *state, PlannedStmt *query, const char *query_string)
+QueryTableEntry *
+LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *query, const char *query_string)
 {
-	int index, oidIndex;
+	int oidIndex;
+	bool found;
 	QueryTableEntry *query_entry;
 	ListCell *roid;
 
-	for (index = 0; index < MAX_QUERY_NUM; index++)
-	{
-		if (state->queryTable[index].xid == 0)
-			break;
-	}
-
-	if (index == MAX_QUERY_NUM - 1)
+	if (state->querynum >= MAX_QUERY_NUM)
 		ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Too many queries in the system")));
 
 	state->querynum++;
 
-	query_entry = &state->queryTable[index];
+	query_entry = (QueryTableEntry *) hash_search(queryTable, query_string, HASH_ENTER, &found);
+
+	if (found)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_DUPLICATE_OBJECT),
+				 errmsg("Duplicate query id, current queryID: %ld, query_string: %s, before "
+						"query_string: %s",
+						query->queryId,
+						query_string,
+						query_entry->query_string)));
+	}
 
 	strcpy(query_entry->query_string, query_string);
+	query_entry->status = QUERY_BLOCKED;
 	query_entry->xid = GetCurrentTransactionId();
 	query_entry->queryId = query->queryId;
 	query_entry->procId = MyProcPid;
 
 	elog(IVM_LOG_LEVEL,
-		 "Logging id: %d, Transactionid: %u, Query: %s, QueryId: %ld, myPid is: %d",
-		 index,
+		 "Logging Transactionid: %u, Query: %s, QueryId: %ld, myPid is: %d",
 		 query_entry->xid,
 		 query_string,
 		 query_entry->queryId,
@@ -51,34 +57,81 @@ LogQuery(ScheduleState *state, PlannedStmt *query, const char *query_string)
 
 	/* Not sure if this is correct.*/
 	oidIndex = 0;
-	foreach(roid, query->relationOids)
+	foreach (roid, query->relationOids)
 	{
-		if (oidIndex > MAX_AFFECTED_TABLE){
-			elog(ERROR,
-				"Too many affected tables for query: %s",
-				state->queryTable[index].query_string);
+		if (oidIndex > MAX_AFFECTED_TABLE)
+		{
+			elog(ERROR, "Too many affected tables for query: %s", query_string);
 		}
 		query_entry->affected_tables[oidIndex++] = lfirst_oid(roid);
 		elog(IVM_LOG_LEVEL, "Logging affected table: %d", lfirst_oid(roid));
 	}
-
-	return index;
+	return query_entry;
 }
 
 /* TODO: Implement a heuristic based rescheduling algorithm*/
 void
-Reschedule(ScheduleState *state){
+Reschedule(HTAB *queryTable, ScheduleState *state)
+{
+	HASH_SEQ_STATUS status;
+	QueryTableEntry *query_entry;
 
-	int i;
+	hash_seq_init(&status, queryTable);
 
-	for (i = 0; i < MAX_QUERY_NUM; i++)
+	while ((query_entry = (QueryTableEntry *) hash_seq_search(&status)) != NULL)
 	{
-		if (state->queryTable[i].xid == 0)
-			continue;
-
-		state->query_status[i] = QUERY_AVAILABLE;
+		if (query_entry->status == QUERY_BLOCKED)
+		{
+			elog(IVM_LOG_LEVEL,
+				 "Rescheduling query: %s, hashkey: %ld",
+				 query_entry->query_string,
+				 query_entry->queryId);
+			query_entry->status = QUERY_AVAILABLE;
+		}
 	}
-
 }
 
+void
+RemoveLoggedQuery(QueryDesc *queryDesc, HTAB *queryHashTable, ScheduleState *schedule_state)
+{
+	QueryTableEntry *query;
+	bool found;
 
+	if (strcmp(queryDesc->sourceText, "") == 0)
+		goto exit;
+
+	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
+
+	query = hash_search(queryHashTable, queryDesc->sourceText, HASH_FIND, &found);
+
+	if (!found)
+	{
+		elog(IVM_LOG_LEVEL,
+			 "Cannot find Query:%s. Qid %ld, myPid is: %d",
+			 queryDesc->sourceText,
+			 queryDesc->plannedstmt->queryId,
+			 MyProcPid);
+		goto exitWithReleasing;
+	}
+
+	elog(IVM_LOG_LEVEL,
+		 "Query:%s Finished!. Removing Qid %ld, myPid is: %d",
+		 queryDesc->sourceText,
+		 query->queryId,
+		 MyProcPid);
+
+	if (MyProcPid == query->procId)
+	{
+		query = hash_search(queryHashTable, queryDesc->sourceText, HASH_REMOVE, &found);
+		if (query == NULL)
+			elog(ERROR, "Can not remove hash table entry");
+		memset(query, 0, sizeof(QueryTableEntry));
+		schedule_state->querynum--;
+	}
+
+exitWithReleasing:
+	LWLockRelease(schedule_state->lock);
+
+exit:
+	return;
+}
