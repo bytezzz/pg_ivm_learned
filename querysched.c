@@ -17,47 +17,49 @@ typedef struct ReferedTable
 } ReferedTable;
 
 QueryTableEntry *
-LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *query, const char *query_string)
+LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedStmt, const char *query_string)
 {
 	int oidIndex;
 	bool found;
 	QueryTableEntry *query_entry;
 	ListCell *roid;
+	QueryTableKey key;
+
+	memset(&key, 0, sizeof(QueryTableKey));
+	key.pid = MyProcPid;
+	strcpy(key.query_string, query_string);
 
 	if (state->querynum >= MAX_QUERY_NUM)
 		ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Too many queries in the system")));
 
 	state->querynum++;
 
-	query_entry = (QueryTableEntry *) hash_search(queryTable, query_string, HASH_ENTER, &found);
+	query_entry = (QueryTableEntry *) hash_search(queryTable, &key, HASH_ENTER, &found);
 
 	if (found)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_DUPLICATE_OBJECT),
-				 errmsg("Duplicate query id, current queryID: %ld, query_string: %s, before "
-						"query_string: %s",
-						query->queryId,
+				 errmsg("Found duplicate entry key, query_string: %s, previous query_string: %s",
 						query_string,
-						query_entry->query_string)));
+						query_entry->key.query_string)));
 	}
 
-	strcpy(query_entry->query_string, query_string);
+	memset(query_entry, 0, sizeof(QueryTableEntry));
+	strcpy(query_entry->key.query_string, query_string);
+	query_entry->key.pid = MyProcPid;
 	query_entry->status = QUERY_BLOCKED;
 	query_entry->xid = GetCurrentTransactionId();
-	query_entry->queryId = query->queryId;
-	query_entry->procId = MyProcPid;
 
 	elog(IVM_LOG_LEVEL,
-		 "Logging Transactionid: %u, Query: %s, QueryId: %ld, myPid is: %d",
+		 "PID %d: Logging Transactionid: %u, Query: %s",
+		 MyProcPid,
 		 query_entry->xid,
-		 query_string,
-		 query_entry->queryId,
-		 MyProcPid);
+		 query_string);
 
 	/* Not sure if this is correct.*/
 	oidIndex = 0;
-	foreach (roid, query->relationOids)
+	foreach (roid, plannedStmt->relationOids)
 	{
 		if (oidIndex > MAX_AFFECTED_TABLE)
 		{
@@ -83,9 +85,9 @@ Reschedule(HTAB *queryTable, ScheduleState *state)
 		if (query_entry->status == QUERY_BLOCKED)
 		{
 			elog(IVM_LOG_LEVEL,
-				 "Rescheduling query: %s, hashkey: %ld",
-				 query_entry->query_string,
-				 query_entry->queryId);
+				 "Allowing PID:%d's Query: %s",
+				 query_entry->key.pid,
+				 query_entry->key.query_string);
 			query_entry->status = QUERY_AVAILABLE;
 		}
 	}
@@ -96,38 +98,25 @@ RemoveLoggedQuery(QueryDesc *queryDesc, HTAB *queryHashTable, ScheduleState *sch
 {
 	QueryTableEntry *query;
 	bool found;
+	QueryTableKey key;
+
+	memset(&key, 0, sizeof(QueryTableKey));
+	key.pid = MyProcPid;
+	strcpy(key.query_string, queryDesc->sourceText);
 
 	if (strcmp(queryDesc->sourceText, "") == 0)
 		goto exit;
 
 	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
 
-	query = hash_search(queryHashTable, queryDesc->sourceText, HASH_FIND, &found);
+	query = hash_search(queryHashTable, &key, HASH_REMOVE, &found);
 
-	if (!found)
+	if (!found || query == NULL)
 	{
-		elog(IVM_LOG_LEVEL,
-			 "Cannot find Query:%s. Qid %ld, myPid is: %d",
-			 queryDesc->sourceText,
-			 queryDesc->plannedstmt->queryId,
-			 MyProcPid);
+		elog(IVM_LOG_LEVEL, "Pid:%d: Cannot find Query:%s", MyProcPid, queryDesc->sourceText);
 		goto exitWithReleasing;
 	}
-
-	elog(IVM_LOG_LEVEL,
-		 "Query:%s Finished!. Removing Qid %ld, myPid is: %d",
-		 queryDesc->sourceText,
-		 query->queryId,
-		 MyProcPid);
-
-	if (MyProcPid == query->procId)
-	{
-		query = hash_search(queryHashTable, queryDesc->sourceText, HASH_REMOVE, &found);
-		if (query == NULL)
-			elog(ERROR, "Can not remove hash table entry");
-		memset(query, 0, sizeof(QueryTableEntry));
-		schedule_state->querynum--;
-	}
+	schedule_state->querynum--;
 
 exitWithReleasing:
 	LWLockRelease(schedule_state->lock);

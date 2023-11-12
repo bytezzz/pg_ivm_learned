@@ -109,7 +109,6 @@ IvmSubXactCallback(SubXactEvent event, SubTransactionId mySubid, SubTransactionI
 void
 _PG_init(void)
 {
-	EnableQueryId();
 	elog(LOG, "Initializing PG_LEARNED_IVM");
 	RegisterXactCallback(IvmXactCallback, NULL);
 	RegisterSubXactCallback(IvmSubXactCallback, NULL);
@@ -520,11 +519,11 @@ pg_hook_shmem_startup(void)
 		PrevShmemStartupHook();
 
 	memset(&info, 0, sizeof(info));
-	info.keysize = MAX_QUERY_LENGTH;
+	info.keysize = sizeof(QueryTableKey);
 	info.entrysize = sizeof(QueryTableEntry);
 
 	queryHashTable =
-		ShmemInitHash("QueryTable", MAX_QUERY_NUM, MAX_QUERY_NUM, &info, HASH_ELEM | HASH_STRINGS);
+		ShmemInitHash("QueryTable", MAX_QUERY_NUM, MAX_QUERY_NUM, &info, HASH_ELEM | HASH_BLOBS);
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 

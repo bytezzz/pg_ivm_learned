@@ -95,16 +95,20 @@ extern void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 
 #define HASH_TABLE_SIZE (MAX_QUERY_NUM * sizeof(QueryTableEntry))
 
+typedef struct QueryTableKey
+{
+	char query_string[MAX_QUERY_LENGTH];
+	uint32 pid;
+} QueryTableKey;
+
 /* Data Structure for metadata like quries, affected tables, immvs or something else */
 /* Just a Proof of Concept for now, We should design a better structure saving them.*/
 /* Considering to make this a hashmap */
 /* Working in Progress */
 typedef struct QueryTableEntry
 {
-	char query_string[MAX_QUERY_LENGTH];
+	QueryTableKey key;
 	Oid affected_tables[MAX_AFFECTED_TABLE];
-	int procId;
-	uint64 queryId;
 	int status;
 	TransactionId xid;
 } QueryTableEntry;
@@ -127,7 +131,7 @@ typedef struct SchedueState
 
 /* querysched.c */
 
-extern QueryTableEntry *LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *query,
+extern QueryTableEntry *LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedstmt,
 								 const char *query_string);
 extern void Reschedule(HTAB *queryTable, ScheduleState *state);
 extern void RemoveLoggedQuery(QueryDesc *queryDesc, HTAB *queryHashTable,
