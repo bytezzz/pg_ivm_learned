@@ -87,11 +87,10 @@ extern void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 
 /* Configurable parameters */
 #define MAX_QUERY_NUM 1000
-#define MAX_QUERY_LENGTH ((Size) 10240)
-#define MAX_TABLE_NUM 500
-#define MAX_AFFECTED_TABLE 500
+#define MAX_QUERY_LENGTH ((Size) 8192)
+#define MAX_AFFECTED_TABLE 100
 
-#define MAX_CONCURRENT_QUERY 10000
+#define MAX_CONCURRENT_QUERY 1
 
 #define HASH_TABLE_SIZE (MAX_QUERY_NUM * sizeof(QueryTableEntry))
 

@@ -71,28 +71,6 @@ LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedStmt, const
 	return query_entry;
 }
 
-/* TODO: Implement a heuristic based rescheduling algorithm*/
-void
-Reschedule(HTAB *queryTable, ScheduleState *state)
-{
-	HASH_SEQ_STATUS status;
-	QueryTableEntry *query_entry;
-
-	hash_seq_init(&status, queryTable);
-
-	while ((query_entry = (QueryTableEntry *) hash_seq_search(&status)) != NULL)
-	{
-		if (query_entry->status == QUERY_BLOCKED)
-		{
-			elog(IVM_LOG_LEVEL,
-				 "Allowing PID:%d's Query: %s",
-				 query_entry->key.pid,
-				 query_entry->key.query_string);
-			query_entry->status = QUERY_AVAILABLE;
-		}
-	}
-}
-
 void
 RemoveLoggedQuery(QueryDesc *queryDesc, HTAB *queryHashTable, ScheduleState *schedule_state)
 {
@@ -107,20 +85,64 @@ RemoveLoggedQuery(QueryDesc *queryDesc, HTAB *queryHashTable, ScheduleState *sch
 	if (strcmp(queryDesc->sourceText, "") == 0)
 		goto exit;
 
-	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
-
 	query = hash_search(queryHashTable, &key, HASH_REMOVE, &found);
 
 	if (!found || query == NULL)
 	{
 		elog(IVM_LOG_LEVEL, "Pid:%d: Cannot find Query:%s", MyProcPid, queryDesc->sourceText);
-		goto exitWithReleasing;
+		goto exit;
 	}
 	schedule_state->querynum--;
 
-exitWithReleasing:
-	LWLockRelease(schedule_state->lock);
-
 exit:
 	return;
+}
+
+/* TODO: Implement a heuristic based rescheduling algorithm*/
+void
+Reschedule(HTAB *queryTable, ScheduleState *state)
+{
+	HASH_SEQ_STATUS status;
+	QueryTableEntry *query_entry;
+	List *sorted = NIL;
+	List *num_of_affected_tables = NIL;
+	ListCell *curr;
+	int j, index;
+	int allowed = 0;
+
+	if (allowed + state->runningQuery == MAX_CONCURRENT_QUERY)
+		return;
+
+	hash_seq_init(&status, queryTable);
+
+	while ((query_entry = (QueryTableEntry *) hash_seq_search(&status)) != NULL)
+	{
+		for (j = 0; query_entry->affected_tables[j] != 0; j++)
+			;
+		index = 0;
+		foreach (curr, sorted)
+		{
+			if (list_nth_int(num_of_affected_tables, index) > j)
+				break;
+			index++;
+		}
+		sorted = list_insert_nth(sorted, index, query_entry);
+		num_of_affected_tables = list_insert_nth_int(num_of_affected_tables, index, j);
+	}
+
+	foreach (curr, sorted)
+	{
+		query_entry = (QueryTableEntry *) lfirst(curr);
+		if (query_entry->status == QUERY_BLOCKED)
+		{
+			allowed++;
+			query_entry->status = QUERY_AVAILABLE;
+			elog(IVM_LOG_LEVEL,
+				 "PID %d: Allowing query: %s",
+				 MyProcPid,
+				 query_entry->key.query_string);
+		}
+		if (allowed + state->runningQuery >= MAX_CONCURRENT_QUERY)
+			break;
+	}
 }

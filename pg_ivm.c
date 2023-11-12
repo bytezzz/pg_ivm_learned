@@ -584,6 +584,10 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 
 		pg_usleep(30);
 	}
+	elog(IVM_LOG_LEVEL, "PID %d: I'm allowed to run %s", MyProcPid, queryDesc->sourceText);
+	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
+	schedule_state->runningQuery++;
+	LWLockRelease(schedule_state->lock);
 }
 
 void
@@ -601,14 +605,26 @@ pg_hook_executor_run(QueryDesc *queryDesc, ScanDirection direction, uint64 count
 	{
 		nesting_level--;
 		if (enable_enforce(nesting_level))
+		{
+			LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
 			RemoveLoggedQuery(queryDesc, queryHashTable, schedule_state);
+			schedule_state->runningQuery--;
+			Reschedule(queryHashTable, schedule_state);
+			LWLockRelease(schedule_state->lock);
+		}
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
 	nesting_level--;
 	if (enable_enforce(nesting_level))
+	{
+		LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
 		RemoveLoggedQuery(queryDesc, queryHashTable, schedule_state);
+		schedule_state->runningQuery--;
+		Reschedule(queryHashTable, schedule_state);
+		LWLockRelease(schedule_state->lock);
+	}
 }
 
 void
