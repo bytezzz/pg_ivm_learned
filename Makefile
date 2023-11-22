@@ -1,5 +1,6 @@
 # contrib/pg_ivm/Makefile
 
+
 MODULE_big = pg_ivm
 OBJS = \
 	$(WIN32RES) \
@@ -27,6 +28,25 @@ include $(PGXS)
 PG_PATH ?= /home/vscode/pgsql
 LOG_FILE ?= /home/vscode/logfile
 
-restart:
+stop:
 	pg_ctl -D $(PG_PATH) -l $(LOG_FILE) stop
+
+start:
 	pg_ctl -D $(PG_PATH) -l $(LOG_FILE) start
+
+restart: stop start
+
+.PHNOY: benchmark
+
+benchmark:
+	python3 benchmark/concurrent_test.py
+
+kill:
+	@PID=$$(ps -ef | grep '[p]ostgres -D' | awk '{print $$2}') ; \
+	if [ -n "$$PID" ]; then \
+		pkill -9 -P $$PID ; \
+		echo "Killed all children processes of PostgreSQL with PID $$PID" ; \
+	else \
+		echo "No main PostgreSQL process found." ; \
+	fi
+

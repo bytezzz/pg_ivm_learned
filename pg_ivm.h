@@ -82,15 +82,17 @@ extern void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
  * which is not scalable. Maybe we should seek for a better solution.
  */
 
-#define QUERY_AVAILABLE 1
 #define QUERY_BLOCKED 0
+#define QUERY_AVAILABLE 1
+#define QUERY_ALLOWED 2
+#define QUERY_GIVE_UP 3
 
 /* Configurable parameters */
 #define MAX_QUERY_NUM 1000
 #define MAX_QUERY_LENGTH ((Size) 8192)
 #define MAX_AFFECTED_TABLE 100
 
-#define MAX_CONCURRENT_QUERY 1
+#define MAX_CONCURRENT_QUERY 4
 
 #define HASH_TABLE_SIZE (MAX_QUERY_NUM * sizeof(QueryTableEntry))
 

@@ -7,7 +7,7 @@ import pandas as pd
 import os
 
 workload = [shipment, good_receive, update_score, adjust_discount]
-max_connection = 4
+max_connection = 16
 ratio = [0.25, 0.25, 0.25, 0.25]
 
 workloads = list(itertools.chain(*[[workload[i]]*int(max_connection*percentage) for i, percentage in enumerate(ratio)]))
@@ -35,7 +35,7 @@ def worker(id, time_costs):
 
 if __name__ == '__main__':
 
-    reptead_times = 2
+    reptead_times = 4
 
     filename = time.strftime("%Y_%m_%d_%H_%M.log")
     workload_name = [f"{workload.__name__}#{i}" for i,workload in enumerate(workloads)]

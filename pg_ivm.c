@@ -25,6 +25,7 @@
 #include "parser/parser.h"
 #include "parser/scansup.h"
 #include "tcop/tcopprot.h"
+#include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
@@ -37,10 +38,12 @@
 #include "executor/execdesc.h"
 #include "executor/executor.h"
 #include "access/parallel.h"
+#include "storage/lmgr.h"
 
 #include "pg_ivm.h"
+#include "conf.h"
 
-#define enable_enforce(level) (!IsParallelWorker() && (level) == 0)
+#define enable_enforce(level) (!IsParallelWorker() && (level) == 0 && !isUtility)
 
 PG_MODULE_MAGIC;
 
@@ -53,12 +56,29 @@ static shmem_startup_hook_type PrevShmemStartupHook = NULL;
 static planner_hook_type PrevPlanHook = NULL;
 static ExecutorStart_hook_type PrevExecutionStartHook = NULL;
 static ExecutorFinish_hook_type PrevExecutionFinishHook = NULL;
+static ExecutorEnd_hook_type PrevExecutionEndHook = NULL;
 static ExecutorRun_hook_type prevExecutorRunHook = NULL;
+static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
 static ScheduleState *schedule_state = NULL;
 static HTAB *queryHashTable = NULL;
 
 static int nesting_level = 0;
+
+/*
+ * This is used to solve the problem of for-loop
+ * expression in for-loop condition will be executed many times without calling ExecutorStart.
+ * We use this variable to record the number of times ExecutorStart is called.
+ * If it is not 0, we will not skip order enforcement in the following ExecutorRun Hook.
+ * See regression test case insert_conflict for more details.
+ */
+static int full_process = 0;
+
+/*
+ * Flag to indicate if the current query is a utility command.
+ * If it is, we will not do order enforcement.
+ */
+static bool isUtility = false;
 
 void _PG_init(void);
 
@@ -78,12 +98,30 @@ void pg_hook_execution_start(QueryDesc *queryDesc, int eflags);
 void pg_hook_executor_run(QueryDesc *queryDesc, ScanDirection direction, uint64 count,
 						  bool execute_once);
 void pg_hook_execution_finish(QueryDesc *queryDesc);
+void pg_hook_executor_end(QueryDesc *queryDesc);
+void pg_hook_process_utility(PlannedStmt *pstmt, const char *queryString, bool readOnlyTree,
+							 ProcessUtilityContext context, ParamListInfo params,
+							 QueryEnvironment *queryEnv, DestReceiver *dest, QueryCompletion *qc);
 
 /* SQL callable functions */
 PG_FUNCTION_INFO_V1(create_immv);
 PG_FUNCTION_INFO_V1(refresh_immv);
 PG_FUNCTION_INFO_V1(IVM_prevent_immv_change);
 PG_FUNCTION_INFO_V1(get_immv_def);
+void getLocksHeldByMe(StringInfo info);
+
+static inline void
+SetLocktagRelationOid(LOCKTAG *tag, Oid relid)
+{
+	Oid dbid;
+
+	if (IsSharedRelation(relid))
+		dbid = InvalidOid;
+	else
+		dbid = MyDatabaseId;
+
+	SET_LOCKTAG_RELATION(*tag, dbid, relid);
+}
 
 /*
  * Call back functions for cleaning up
@@ -133,6 +171,12 @@ _PG_init(void)
 
 	PrevExecutionFinishHook = ExecutorFinish_hook;
 	ExecutorFinish_hook = pg_hook_execution_finish;
+
+	PrevExecutionEndHook = ExecutorEnd_hook;
+	ExecutorEnd_hook = pg_hook_executor_end;
+
+	prev_ProcessUtility = ProcessUtility_hook;
+	ProcessUtility_hook = pg_hook_process_utility;
 }
 
 /*
@@ -551,8 +595,12 @@ pg_hook_planner(Query *parse, const char *query_string, int cursor_options,
 void
 pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 {
-	int status;
+	int status, i, j, iter;
 	QueryTableEntry *query_entry;
+	RefedImmv *refed_immv;
+	LOCKTAG tag;
+	Bitmapset *newlyLocked = NULL;
+	StringInfoData info;
 
 	if (PrevExecutionStartHook)
 		PrevExecutionStartHook(queryDesc, eflags);
@@ -564,6 +612,8 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 		!enable_enforce(nesting_level))
 		return;
 
+	full_process++;
+
 	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
 
 	query_entry =
@@ -571,23 +621,83 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 
 	Reschedule(queryHashTable, schedule_state);
 
+	Assert(schedule_state->runningQuery >= 0 &&
+		   schedule_state->runningQuery <= MAX_CONCURRENT_QUERY);
+
 	LWLockRelease(schedule_state->lock);
 
+waiting:
 	for (;;)
 	{
+		int running;
 		LWLockAcquire(schedule_state->lock, LW_SHARED);
 		status = query_entry->status;
+		running = schedule_state->runningQuery;
 		LWLockRelease(schedule_state->lock);
+
+		/* Check if no query is running and this query is also not available
+		 * If so, We trigger a rescheduling to wake it up.
+		 */
+		if (running == 0 && status != QUERY_AVAILABLE)
+		{
+			LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
+			Reschedule(queryHashTable, schedule_state);
+			status = query_entry->status;
+			LWLockRelease(schedule_state->lock);
+		}
 
 		if (status == QUERY_AVAILABLE)
 			break;
 
 		pg_usleep(30);
 	}
-	elog(IVM_LOG_LEVEL, "PID %d: I'm allowed to run %s", MyProcPid, queryDesc->sourceText);
-	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
-	schedule_state->runningQuery++;
-	LWLockRelease(schedule_state->lock);
+
+	newlyLocked = NULL;
+
+	for (i = 0; i < MAX_AFFECTED_TABLE && query_entry->affected_tables[i] != 0; i++)
+	{
+		refed_immv = getRefrenceImmv(query_entry->affected_tables[i]);
+
+		if (refed_immv == NULL)
+			continue;
+
+		for (j = 0; j < refed_immv->refed_table_num; j++)
+		{
+			SetLocktagRelationOid(&tag, refed_immv->refed_table[j]);
+
+			if (LockHeldByMe(&tag, ExclusiveLock))
+			{
+				continue;
+			}
+			else if (ConditionalLockRelationOid(refed_immv->refed_table[j], ExclusiveLock))
+			{
+				newlyLocked = bms_add_member(newlyLocked, refed_immv->refed_table[j]);
+			}
+			else
+			{
+				iter = -1;
+				while ((iter = bms_next_member(newlyLocked, iter)) >= 0)
+				{
+					UnlockRelationOid(iter, ExclusiveLock);
+				}
+				getLocksHeldByMe(&info);
+				bms_free(newlyLocked);
+
+				LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
+				query_entry->status = QUERY_GIVE_UP;
+				schedule_state->runningQuery--;
+				Reschedule(queryHashTable, schedule_state);
+				LWLockRelease(schedule_state->lock);
+				goto waiting;
+			}
+		}
+	}
+
+	getLocksHeldByMe(&info);
+	elog(IVM_LOG_LEVEL,
+		 "Got all necessary locks to run xid %d,I'm holding %s.",
+		 query_entry->xid,
+		 info.data);
 }
 
 void
@@ -604,11 +714,16 @@ pg_hook_executor_run(QueryDesc *queryDesc, ScanDirection direction, uint64 count
 	PG_CATCH();
 	{
 		nesting_level--;
-		if (enable_enforce(nesting_level))
+		Assert(nesting_level >= 0);
+		if (!(strcmp(queryDesc->sourceText, "") == 0) && enable_enforce(nesting_level) &&
+			full_process)
 		{
+			full_process--;
 			LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
-			RemoveLoggedQuery(queryDesc, queryHashTable, schedule_state);
 			schedule_state->runningQuery--;
+			RemoveLoggedQuery(queryDesc, queryHashTable, schedule_state);
+			Assert(schedule_state->runningQuery >= 0 &&
+				   schedule_state->runningQuery <= MAX_CONCURRENT_QUERY);
 			Reschedule(queryHashTable, schedule_state);
 			LWLockRelease(schedule_state->lock);
 		}
@@ -617,13 +732,36 @@ pg_hook_executor_run(QueryDesc *queryDesc, ScanDirection direction, uint64 count
 	PG_END_TRY();
 
 	nesting_level--;
-	if (enable_enforce(nesting_level))
+
+	Assert(nesting_level >= 0);
+	if (!(strcmp(queryDesc->sourceText, "") == 0) && enable_enforce(nesting_level) && full_process)
 	{
+		full_process--;
 		LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
 		RemoveLoggedQuery(queryDesc, queryHashTable, schedule_state);
 		schedule_state->runningQuery--;
 		Reschedule(queryHashTable, schedule_state);
+
+		Assert(schedule_state->runningQuery >= 0 &&
+			   schedule_state->runningQuery <= MAX_CONCURRENT_QUERY);
+
 		LWLockRelease(schedule_state->lock);
+	}
+}
+
+void
+getLocksHeldByMe(StringInfo info)
+{
+	int i;
+	LOCKTAG tag;
+	initStringInfo(info);
+	for (i = 0; i < immv_count; i++)
+	{
+		SetLocktagRelationOid(&tag, all_immvs[i]);
+		if (LockHeldByMe(&tag, ExclusiveLock))
+		{
+			appendStringInfo(info, "%d ", all_immvs[i]);
+		}
 	}
 }
 
@@ -634,4 +772,47 @@ pg_hook_execution_finish(QueryDesc *queryDesc)
 		PrevExecutionFinishHook(queryDesc);
 	else
 		standard_ExecutorFinish(queryDesc);
+}
+
+void
+pg_hook_executor_end(QueryDesc *queryDesc)
+{
+	if (PrevExecutionEndHook)
+		PrevExecutionEndHook(queryDesc);
+	else
+		standard_ExecutorEnd(queryDesc);
+}
+
+void
+pg_hook_process_utility(PlannedStmt *pstmt, const char *queryString, bool readOnlyTree,
+						ProcessUtilityContext context, ParamListInfo params,
+						QueryEnvironment *queryEnv, DestReceiver *dest, QueryCompletion *qc)
+{
+	isUtility = true;
+	PG_TRY();
+	{
+		if (prev_ProcessUtility)
+			prev_ProcessUtility(pstmt,
+								queryString,
+								readOnlyTree,
+								context,
+								params,
+								queryEnv,
+								dest,
+								qc);
+		else
+			standard_ProcessUtility(pstmt,
+									queryString,
+									readOnlyTree,
+									context,
+									params,
+									queryEnv,
+									dest,
+									qc);
+	}
+	PG_FINALLY();
+	{
+		isUtility = false;
+	}
+	PG_END_TRY();
 }
