@@ -26,7 +26,7 @@ class DBReplayBufferSamples(NamedTuple):
 
 
 ACTION_FEATURE_SIZE = 1024
-ENV_FEATURE_SIZE = 1
+ENV_FEATURE_SIZE = 17
 MAX_ACTION_NUM = 100
 
 
@@ -223,35 +223,6 @@ class QNetwork(nn.Module):
             nn.Linear(84, 1),
         )
 
-    # def forward(
-    #    self,
-    #    env_embedding: torch.Tensor,
-    #    action_embedding: torch.Tensor,
-    # ):
-    #    """
-    #    :param env_embedding: (ENGINE_NUMS, ENV_FEATURE_SIZE)
-    #    :param action_embedding: (ENGINE_NUMS, VALID_ACTIONS_NUMS, ACTION_FEATURE_SIZE)
-    #    """
-
-    #    assert env_embedding.shape[1] == ENV_FEATURE_SIZE
-    #    assert action_embedding.shape[2] == ACTION_FEATURE_SIZE
-
-    #    engine_nums = env_embedding.shape[0]
-    #    max_actions = action_embedding.shape[1]
-
-    #    #env_embedding = torch.nn.functional.normalize(env_embedding, dim=1)
-    #    #action_embedding = torch.nn.functional.normalize(action_embedding, dim=2)
-
-    #    expanded = env_embedding.unsqueeze(1).expand(-1, max_actions, -1)
-
-    #    compact_features = torch.cat((expanded, action_embedding), dim=2).reshape(
-    #        engine_nums * max_actions, -1
-    #    )
-
-    #    q_values = self.network(compact_features).reshape((engine_nums, max_actions))
-
-    #    return q_values
-
     def forward(
         self,
         env_embedding: torch.Tensor,
@@ -353,7 +324,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     start_time = time.time()
 
     pg_engine = Engine()
-    pg_engine.connect("localhost", 2300)
+    pg_engine.bind("localhost", 2300)
 
     reqs = pg_engine.fetch_req()
 

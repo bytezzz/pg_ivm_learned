@@ -22,7 +22,7 @@
 
 typedef struct payload_t {
     double embedding[1024];
-} payload;
+} query_embed;
 
 typedef struct response_t {
     uint32_t decision;
@@ -31,6 +31,10 @@ typedef struct response_t {
 typedef struct feedback_t {
 		double reward;
 } feedback;
+
+typedef struct env_features_t{
+		int LRU[WORKING_TABLES];
+} env_features;
 
 #pragma pack()
 
@@ -57,7 +61,7 @@ void sendMsg(int sock, void* msg, uint32_t msgsize)
 
 void sendRequest(QueryTableEntry *qte)
 {
-	sendMsg(decision_server_socket, qte->embedding, sizeof(payload));
+	sendMsg(decision_server_socket, qte->embedding, sizeof(query_embed));
 }
 
 uint32
@@ -101,7 +105,7 @@ LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedStmt, const
 	QueryTableKey key;
 	int effective_index = 0;
 	double *tensor;
-	int table_one_hot_index = 0;
+	int table_one_hot_index;
 
 	memset(&key, 0, sizeof(QueryTableKey));
 	key.pid = MyProcPid;
@@ -153,15 +157,10 @@ LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedStmt, const
 
 		table_one_hot_index = getIndexForTableEmbeeding(lfirst_oid(roid));
 
-		if (table_one_hot_index == -1){
-			elog(WARNING, "Cannot find table embedding for table oid: %d", lfirst_oid(roid));
-			continue;
-		}
-
-		tensor[getIndexForTableEmbeeding(lfirst_oid(roid)) + 7] = 1;
+		tensor[table_one_hot_index + 7] = 1;
 	}
 
-	effective_index = embed_plan_node(tensor, plannedStmt->planTree, 15);
+	effective_index = embed_plan_node(tensor, plannedStmt->planTree, 16);
 	memset(&tensor[effective_index], -1, (QUERY_EMBEDDING_SIZE - effective_index) * sizeof(double));
 	return query_entry;
 }
@@ -225,12 +224,13 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state)
 
 	if(list_length(listing) > 1){
 		elog(LOG, "Querying server for decision.");
+		sendMsg(decision_server_socket, state->LRUTableAccess, sizeof(env_features));
 		foreach(curr, listing){
 			query_entry = (QueryTableEntry *) lfirst(curr);
 			sendRequest(query_entry);
 		}
 		memset(endTensor, -1, QUERY_EMBEDDING_SIZE * sizeof(double));
-		sendMsg(decision_server_socket, endTensor, sizeof(payload));
+		sendMsg(decision_server_socket, endTensor, sizeof(query_embed));
 		elog(LOG, "%d queries sent for decision, %d queries is giving up.", list_length(listing), giving_up);
 		decision = recvDecision();
 		elog(LOG, "Received decision: %d", decision);

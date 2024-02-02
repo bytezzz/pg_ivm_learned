@@ -99,6 +99,9 @@ extern void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 
 #define QUERY_EMBEDDING_SIZE 1024
 
+//8 base tables, 8 immvs, 1 for all other tables
+#define WORKING_TABLES 17
+
 #define HASH_TABLE_SIZE (MAX_QUERY_NUM * sizeof(QueryTableEntry))
 
 typedef struct QueryTableKey
@@ -131,14 +134,14 @@ typedef struct SchedueState
 				will subsequently affect ScheduleTable
 	*/
 	LWLock *lock;
-	int query_status[MAX_QUERY_NUM];
+
+	int LRUTableAccess[WORKING_TABLES];
 
 	double last_reward;
 
 } ScheduleState;
 
 #define SEGMENT_SIZE (sizeof(ScheduleState))
-
 /* querysched.c */
 
 extern QueryTableEntry *LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedstmt,
@@ -146,5 +149,7 @@ extern QueryTableEntry *LogQuery(HTAB *queryTable, ScheduleState *state, Planned
 extern void Reschedule(HTAB *queryTable, ScheduleState *state);
 extern void RemoveLoggedQuery(QueryDesc *queryDesc, HTAB *queryHashTable,
 							  ScheduleState *schedule_state);
+
+extern void log_table_access(ScheduleState * ss, Oid *affected_table);
 
 #endif

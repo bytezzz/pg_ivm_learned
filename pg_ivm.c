@@ -39,6 +39,7 @@
 #include "executor/executor.h"
 #include "access/parallel.h"
 #include "storage/lmgr.h"
+#include "catalog/catalog.h"
 
 #include "pg_ivm.h"
 #include "conf.h"
@@ -733,6 +734,10 @@ waiting:
 		 "Got all necessary locks to run xid %d,I'm holding %s.",
 		 query_entry->xid,
 		 info.data);
+
+	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
+	log_table_access(schedule_state, query_entry->affected_tables);
+	LWLockRelease(schedule_state->lock);
 }
 
 void

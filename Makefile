@@ -9,7 +9,9 @@ OBJS = \
 	pg_ivm.o \
 	ruleutils.o \
 	subselect.o \
-	querysched.o
+	querysched.o \
+	env_embedding.o \
+	conf.o
 PGFILEDESC = "pg_ivm - incremental view maintenance on PostgreSQL"
 
 EXTENSION = pg_ivm

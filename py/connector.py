@@ -4,17 +4,24 @@ import socket
 from ctypes import *
 import time
 
-class RequestEmbed(Structure):
+class MyStruct(Structure):
     _pack_ = 1
+
+class RequestEmbed(MyStruct):
     _fields_ = [("embedding", c_double * 1024)]
 
-class ScheduleDecision(Structure):
-    _pack_ = 1
+class ScheduleDecision(MyStruct):
     _fields_ = [("decision", c_uint32)]
 
-class FeedBack(Structure):
-    _pack_ = 1
-    _fields_ = [("reward", c_double)]
+class EnvFeatures(MyStruct):
+    _fields_ = [("lru", c_int * 17)]
+
+@classmethod
+def recv_and_unpack(cls, socket: socket.socket):
+  buff = socket.recv(sizeof(cls))
+  return cls.from_buffer_copy(buff)
+
+MyStruct.recv_and_unpack = recv_and_unpack
 
 class Reqs:
   def __init__(self,
@@ -51,7 +58,7 @@ class Engine:
     self.fired = False
     print("Socket created")
 
-  def connect(self, host, port):
+  def bind(self, host, port):
     self.ssock.bind((host, port))
     self.ssock.listen(3)
     print("Server listening on port {:d}".format(port))
@@ -60,16 +67,15 @@ class Engine:
     print("Accepted connection from {:s}".format(self.client_address[0]))
 
   def fetch_req(self) -> Reqs:
-    #if self.fired:
-    #  buff = self.csock.recv(sizeof(FeedBack))
-    #  feedback = FeedBack.from_buffer_copy(buff)
-    #  reward = feedback.reward
 
     tensor_lists = []
-    buff = self.csock.recv(sizeof(RequestEmbed))
 
-    while buff:
-      payload_in = RequestEmbed.from_buffer_copy(buff)
+    env_features = np.array(EnvFeatures.recv_and_unpack(self.csock).lru, dtype=np.float32)
+
+    #print(f"Received LRU: {np.array(env_features.lru)}")
+
+    while payload_in := RequestEmbed.recv_and_unpack(self.csock):
+
       embedding = np.array(payload_in.embedding)
       if np.isnan(embedding).all():
         break
@@ -78,18 +84,18 @@ class Engine:
       embedding[np.isnan(embedding)] = 0.0
 
       tensor_lists.append(embedding)
-      buff = self.csock.recv(sizeof(RequestEmbed))
 
+    #print("Received {:d} tensors".format(len(tensor_lists)))
 
-    print("Received {:d} tensors".format(len(tensor_lists)))
-    if self.fired:
-      reward = -(time.time() - self.prev_time) * len(tensor_lists)
+    if not self.fired:
+      self.fired = True
       self.prev_time = time.time()
-      return reward, Reqs(np.array(tensor_lists), np.array([0]), self.csock)
+      return Reqs(np.array(tensor_lists), env_features, self.csock)
 
-    self.fired = True
+    reward = -(time.time() - self.prev_time) * len(tensor_lists)
     self.prev_time = time.time()
-    return Reqs(np.array(tensor_lists), np.array([0.0]), self.csock)
+    return reward, Reqs(np.array(tensor_lists), env_features, self.csock)
+
 
   def close(self):
     self.ssock.close()
@@ -109,7 +115,7 @@ class ParallelEngines:
 if __name__ == "__main__":
   try:
     engine = Engine()
-    engine.connect("localhost", 2300)
+    engine.bind("localhost", 2300)
     reqs = engine.fetch_req()
     while(True):
       reqs.make_decision(reqs.get_random_action())
