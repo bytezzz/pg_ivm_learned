@@ -8,12 +8,82 @@
 #include "nodes/plannodes.h"
 #include "utils/builtins.h"
 #include "storage/lmgr.h"
+#include "nodes/nodes.h"
 
 #include "pg_ivm.h"
+#include <netinet/in.h>
+#include <resolv.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <errno.h>
 
+#pragma pack(1)
+
+typedef struct payload_t {
+    double embedding[1024];
+} payload;
+
+typedef struct response_t {
+    uint32_t decision;
+} response;
+
+typedef struct feedback_t {
+		double reward;
+} feedback;
+
+#pragma pack()
+
+extern int decision_server_socket;
+extern int getIndexForTableEmbeeding(Oid oid);
 void RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state);
 void RescheduleUseFCFS(HTAB *queryTable, ScheduleState *state);
 void RescheduleUseHotTableFirst(HTAB *queryTable, ScheduleState *state);
+void RescheduleWithServer(HTAB *queryTable, ScheduleState *state);
+int embed_plan_node(double *tensor, Plan *plan, int start);
+void sendMsg(int sock, void* msg, uint32_t msgsize);
+void sendRequest(QueryTableEntry *qte);
+uint32 recvDecision();
+
+void sendMsg(int sock, void* msg, uint32_t msgsize)
+{
+    if (write(sock, msg, msgsize) < 0)
+    {
+				ereport(ERROR, (errcode(ERRCODE_IO_ERROR), errmsg("Can't send message.")));
+        close(sock);
+    }
+    return;
+}
+
+void sendRequest(QueryTableEntry *qte)
+{
+	sendMsg(decision_server_socket, qte->embedding, sizeof(payload));
+}
+
+uint32
+recvDecision()
+{
+	uint32_t decision;
+	ssize_t nread;
+
+	nread = read(decision_server_socket, &decision, sizeof(uint32_t));
+	if (nread == 0){
+		elog(ERROR, "Connection closed by server.");
+		close(decision_server_socket);
+	}
+	else if (nread < 0){
+		elog(ERROR, "Error reading from server.");
+		close(decision_server_socket);
+	}
+	else if (nread != sizeof(uint32_t))
+	{
+		ereport(ERROR, (errcode(ERRCODE_IO_ERROR), errmsg("Can't receive the decision from server.")));
+		close(decision_server_socket);
+	}
+	elog(IVM_LOG_LEVEL, "Received decision: %d", decision);
+
+	return decision;
+}
 
 typedef struct TableRef
 {
@@ -29,6 +99,9 @@ LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedStmt, const
 	QueryTableEntry *query_entry;
 	ListCell *roid;
 	QueryTableKey key;
+	int effective_index = 0;
+	double *tensor;
+	int table_one_hot_index = 0;
 
 	memset(&key, 0, sizeof(QueryTableKey));
 	key.pid = MyProcPid;
@@ -58,6 +131,16 @@ LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedStmt, const
 
 	elog(IVM_LOG_LEVEL, "Logging Transactionid: %u", query_entry->xid);
 
+	tensor = query_entry->embedding;
+
+	tensor[0] = plannedStmt->commandType;
+	tensor[1] = plannedStmt->hasReturning;
+	tensor[2] = plannedStmt->hasModifyingCTE;
+	tensor[3] = plannedStmt->canSetTag;
+	tensor[4] = plannedStmt->transientPlan;
+	tensor[5] = plannedStmt->dependsOnRole;
+	tensor[6] = plannedStmt->parallelModeNeeded;
+
 	/* Not sure if this is correct.*/
 	oidIndex = 0;
 	foreach (roid, plannedStmt->relationOids)
@@ -67,8 +150,19 @@ LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedStmt, const
 			elog(ERROR, "Too many affected tables for query: %s", query_string);
 		}
 		query_entry->affected_tables[oidIndex++] = lfirst_oid(roid);
-		// elog(IVM_LOG_LEVEL, "Logging affected table: %d", lfirst_oid(roid));
+
+		table_one_hot_index = getIndexForTableEmbeeding(lfirst_oid(roid));
+
+		if (table_one_hot_index == -1){
+			elog(WARNING, "Cannot find table embedding for table oid: %d", lfirst_oid(roid));
+			continue;
+		}
+
+		tensor[getIndexForTableEmbeeding(lfirst_oid(roid)) + 7] = 1;
 	}
+
+	effective_index = embed_plan_node(tensor, plannedStmt->planTree, 15);
+	memset(&tensor[effective_index], -1, (QUERY_EMBEDDING_SIZE - effective_index) * sizeof(double));
 	return query_entry;
 }
 
@@ -94,15 +188,73 @@ RemoveLoggedQuery(QueryDesc *queryDesc, HTAB *queryHashTable, ScheduleState *sch
 	elog(IVM_LOG_LEVEL, "Removing Query xid:%d", query->xid);
 	schedule_state->querynum--;
 }
+void
+RescheduleWithServer(HTAB *queryTable, ScheduleState *state)
+{
+	HASH_SEQ_STATUS status;
+	QueryTableEntry *query_entry;
+	int available_num;
+	uint32_t decision = 0;
+	List *listing = NIL;
+	ListCell *curr = NULL;
+	static double endTensor[QUERY_EMBEDDING_SIZE];
+	int giving_up = 0;
+
+	available_num = MAX_CONCURRENT_QUERY - state->runningQuery;
+
+	if (available_num <= 0)
+		return;
+
+	hash_seq_init(&status, queryTable);
+
+	while((query_entry = (QueryTableEntry *) hash_seq_search(&status)) != NULL)
+	{
+		if (query_entry->status == QUERY_BLOCKED)
+		{
+			listing = lappend(listing, query_entry);
+		}
+		else if (query_entry->status == QUERY_GIVE_UP)
+		{
+			query_entry->status = QUERY_BLOCKED;
+			giving_up++;
+		}
+	}
+
+	if (listing == NIL)
+		return;
+
+	if(list_length(listing) > 1){
+		elog(LOG, "Querying server for decision.");
+		foreach(curr, listing){
+			query_entry = (QueryTableEntry *) lfirst(curr);
+			sendRequest(query_entry);
+		}
+		memset(endTensor, -1, QUERY_EMBEDDING_SIZE * sizeof(double));
+		sendMsg(decision_server_socket, endTensor, sizeof(payload));
+		elog(LOG, "%d queries sent for decision, %d queries is giving up.", list_length(listing), giving_up);
+		decision = recvDecision();
+		elog(LOG, "Received decision: %d", decision);
+	}
+
+	query_entry = (QueryTableEntry *)list_nth(listing, decision);
+	query_entry->status = QUERY_AVAILABLE;
+	query_entry->start_time = clock();
+
+	state->runningQuery++;
+}
 
 /* TODO: Implement a heuristic based rescheduling algorithm*/
 /* I noticed that some uneffective strategy will cause additionally deadlock.*/
 void
 Reschedule(HTAB *queryTable, ScheduleState *state)
 {
-	// RescheduleUseFCFS(queryTable, state);
-	// RescheduleUseMinTableAffected(queryTable, state);
-	RescheduleUseHotTableFirst(queryTable, state);
+	int avaliable;
+	avaliable = MAX_CONCURRENT_QUERY - state->runningQuery;
+	if (avaliable == 1){
+		RescheduleWithServer(queryTable, state);
+	}else{
+		RescheduleUseHotTableFirst(queryTable, state);
+	}
 }
 
 void
@@ -278,3 +430,35 @@ RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state)
 			break;
 	}
 }
+
+int embed_plan_node(double *tensor, Plan *plan, int start){
+
+	int return_index = 0;
+
+	if (start > QUERY_EMBEDDING_SIZE - 8){
+		elog(ERROR, "Query embedding size is too small");
+		return start;
+	}
+
+	//not using one-hot encoding here, becuase there are too many(~40) plan node types.
+	tensor[start] = nodeTag(plan);
+
+	tensor[start + 1] = plan->startup_cost;
+	tensor[start + 2] = plan->total_cost;
+	tensor[start + 3] = plan->plan_rows;
+	tensor[start + 4] = plan->plan_width;
+	tensor[start + 5] = plan->parallel_aware;
+	tensor[start + 6] = plan->parallel_safe;
+	tensor[start + 7] = plan->async_capable;
+
+	return_index = start + 8;
+
+	if (plan->lefttree)
+		return_index = embed_plan_node(tensor, plan->lefttree, start + 8);
+	if (plan->righttree)
+		return_index = embed_plan_node(tensor, plan->righttree, start + 8 + 8);
+
+	return return_index;
+}
+
+

@@ -43,12 +43,20 @@
 #include "pg_ivm.h"
 #include "conf.h"
 
+#include <netinet/in.h>
+#include <resolv.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <errno.h>
+
 #define enable_enforce(level) (!IsParallelWorker() && (level) == 0 && !isUtility)
 
 PG_MODULE_MAGIC;
 
 static Oid pg_ivm_immv_id = InvalidOid;
 static Oid pg_ivm_immv_pkey_id = InvalidOid;
+int decision_server_socket = -1;
 
 static object_access_hook_type PrevObjectAccessHook = NULL;
 static shmem_request_hook_type PrevShmemRequestHook = NULL;
@@ -102,6 +110,7 @@ void pg_hook_executor_end(QueryDesc *queryDesc);
 void pg_hook_process_utility(PlannedStmt *pstmt, const char *queryString, bool readOnlyTree,
 							 ProcessUtilityContext context, ParamListInfo params,
 							 QueryEnvironment *queryEnv, DestReceiver *dest, QueryCompletion *qc);
+extern void sendMsg(int sock, void* msg, uint32_t msgsize);
 
 /* SQL callable functions */
 PG_FUNCTION_INFO_V1(create_immv);
@@ -147,9 +156,34 @@ IvmSubXactCallback(SubXactEvent event, SubTransactionId mySubid, SubTransactionI
 void
 _PG_init(void)
 {
+	struct sockaddr_in server_address;
+
 	elog(LOG, "Initializing PG_LEARNED_IVM");
 	RegisterXactCallback(IvmXactCallback, NULL);
 	RegisterSubXactCallback(IvmSubXactCallback, NULL);
+
+	elog(LOG, "Connecting to decision server");
+	decision_server_socket = socket(AF_INET, SOCK_STREAM, 0);
+	if (decision_server_socket < 0) {
+		printf("ERROR: Socket creation failed\n");
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("Socket creation failed")));
+	}
+
+	memset(&server_address, 0, sizeof(server_address));
+	server_address.sin_family = AF_INET;
+	inet_pton(AF_INET, SERVERNAME, &server_address.sin_addr);
+	server_address.sin_port = htons(PORT);
+
+	if (connect(decision_server_socket, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
+		printf("ERROR: Unable to connect to server\n");
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("Unable to connect to server")));
+	}
+
+	elog(LOG, "Connected to %s", SERVERNAME);
 
 	PrevObjectAccessHook = object_access_hook;
 	object_access_hook = PgIvmObjectAccessHook;
@@ -608,7 +642,8 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 		standard_ExecutorStart(queryDesc, eflags);
 
 	if (strcmp(queryDesc->sourceText, "") == 0 ||
-		(eflags & (EXEC_FLAG_EXPLAIN_GENERIC | EXEC_FLAG_EXPLAIN_ONLY)) ||
+		//(eflags & (EXEC_FLAG_EXPLAIN_GENERIC | EXEC_FLAG_EXPLAIN_ONLY)) ||
+		(eflags & EXEC_FLAG_EXPLAIN_ONLY) ||
 		!enable_enforce(nesting_level))
 		return;
 

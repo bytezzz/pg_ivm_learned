@@ -1,13 +1,13 @@
 #include "postgres.h"
 
-#define tpch_1 58682
-#define tpch_3 58701
-#define tpch_5 58736
-#define tpch_7 58795
-#define tpch_9 58846
-#define tpch_10 58905
-#define tpch_12 58948
-#define tpch_19 58973
+#define tpch_1 39992
+#define tpch_3 40011
+#define tpch_5 40046
+#define tpch_7 40105
+#define tpch_9 40156
+#define tpch_10 40215
+#define tpch_12 40258
+#define tpch_19 40283
 #define nation 16390
 #define region 16393
 #define customer 16405
@@ -16,6 +16,8 @@
 #define part 16396
 #define partsupp 16402
 #define supplier 16399
+
+
 
 typedef struct RefedImmv
 {
@@ -26,6 +28,7 @@ typedef struct RefedImmv
 } RefedImmv;
 
 RefedImmv *getRefrenceImmv(Oid relOid);
+int getIndexForTableEmbeeding(Oid oid);
 const Oid immv_on_nations[] = { tpch_5, tpch_7, tpch_9, tpch_10 };
 const Oid immv_on_regions[] = { tpch_5 };
 const Oid immv_on_customers[] = { tpch_3, tpch_5, tpch_7, tpch_10 };
@@ -61,4 +64,25 @@ getRefrenceImmv(Oid relOid)
 			return &refed_immv[i];
 	}
 	return NULL;
+}
+
+int getIndexForTableEmbeeding(Oid oid){
+	if (oid == customer)
+		return 0;
+	else if (oid == lineitem)
+		return 1;
+	else if (oid == nation)
+		return 2;
+	else if (oid == orders)
+		return 3;
+	else if (oid == part)
+		return 4;
+	else if (oid == partsupp)
+		return 5;
+	else if (oid == region)
+		return 6;
+	else if (oid == supplier)
+		return 7;
+	else
+		return -1;
 }

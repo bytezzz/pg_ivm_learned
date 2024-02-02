@@ -25,8 +25,8 @@ PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
 # Define the path variable
-PG_PATH ?= /home/vscode/pgsql
-LOG_FILE ?= /home/vscode/logfile
+PG_PATH ?= /workspaces/LearnedIVM/pgdata
+LOG_FILE ?= /workspaces/LearnedIVM/logfile
 
 stop:
 	pg_ctl -D $(PG_PATH) -l $(LOG_FILE) stop

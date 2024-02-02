@@ -32,6 +32,9 @@
 #define Anum_pg_ivm_immv_viewdef 2
 #define Anum_pg_ivm_immv_ispopulated 3
 
+#define SERVERNAME  "localhost"
+#define PORT  2300
+
 #define IVM_LOG_LEVEL DEBUG1
 /* pg_ivm.c */
 
@@ -94,6 +97,8 @@ extern void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 
 #define MAX_CONCURRENT_QUERY 4
 
+#define QUERY_EMBEDDING_SIZE 1024
+
 #define HASH_TABLE_SIZE (MAX_QUERY_NUM * sizeof(QueryTableEntry))
 
 typedef struct QueryTableKey
@@ -110,8 +115,10 @@ typedef struct QueryTableEntry
 {
 	QueryTableKey key;
 	Oid affected_tables[MAX_AFFECTED_TABLE];
+	double embedding[QUERY_EMBEDDING_SIZE];
 	int status;
 	TransactionId xid;
+	clock_t start_time;
 } QueryTableEntry;
 
 /* Saving all necessary information we need for query scheduling*/
@@ -125,6 +132,8 @@ typedef struct SchedueState
 	*/
 	LWLock *lock;
 	int query_status[MAX_QUERY_NUM];
+
+	double last_reward;
 
 } ScheduleState;
 
