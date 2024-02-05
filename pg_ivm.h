@@ -32,10 +32,6 @@
 #define Anum_pg_ivm_immv_viewdef 2
 #define Anum_pg_ivm_immv_ispopulated 3
 
-#define SERVERNAME  "localhost"
-#define PORT  2300
-
-#define IVM_LOG_LEVEL DEBUG1
 /* pg_ivm.c */
 
 extern void CreateChangePreventTrigger(Oid matviewOid);
@@ -76,19 +72,29 @@ extern char *pg_ivm_get_viewdef(Relation immvrel, bool pretty);
 /* subselect.c */
 extern void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 
-/* Learned_ivm-related Structures*/
+/* Learned_ivm-related Structures */
 
-/*
- * The current implementation heavily depends on shared memory,
- * however, the size of shared memory is fixed after allocation.
- * Therefore, we need to use fixed size for all the data structures
- * which is not scalable. Maybe we should seek for a better solution.
- */
+/* Decision server info */
+#define SERVERNAME  "localhost"
+#define PORT  2300
 
-#define QUERY_BLOCKED 0
-#define QUERY_AVAILABLE 1
-#define QUERY_ALLOWED 2
-#define QUERY_GIVE_UP 3
+/*ivm related log level*/
+#define IVM_LOG_LEVEL DEBUG1
+
+enum query_staus{
+
+	/* After a new received query logging into the global structure, it will become blocked*/
+	QUERY_BLOCKED,
+
+	/* Reschedule functions will change their status into "avaliable",
+	 * after which corresponding backend process can execute them. */
+	QUERY_AVAILABLE,
+
+	/* If a query can not acquire all necessary locks, it will give up this schedule,
+		queries in the status of giving up can not be start in next schedule decision,
+		but will become avaliable after a schedule event.*/
+	QUERY_GIVE_UP
+};
 
 /* Configurable parameters */
 #define MAX_QUERY_NUM 1000
@@ -104,16 +110,20 @@ extern void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 
 #define HASH_TABLE_SIZE (MAX_QUERY_NUM * sizeof(QueryTableEntry))
 
+/*
+ * The current implementation heavily depends on shared memory,
+ * however, the size of shared memory is fixed after allocation.
+ * Therefore, we need to use fixed size for all the data structures
+ * which is not scalable.
+ * Maybe switch to the new dynamic shared memory features in fulture.
+ */
+
 typedef struct QueryTableKey
 {
 	char query_string[MAX_QUERY_LENGTH];
 	uint32 pid;
 } QueryTableKey;
 
-/* Data Structure for metadata like quries, affected tables, immvs or something else */
-/* Just a Proof of Concept for now, We should design a better structure saving them.*/
-/* Considering to make this a hashmap */
-/* Working in Progress */
 typedef struct QueryTableEntry
 {
 	QueryTableKey key;
@@ -135,13 +145,11 @@ typedef struct SchedueState
 	*/
 	LWLock *lock;
 
-	int LRUTableAccess[WORKING_TABLES];
-
-	double last_reward;
-
+	int tableAccessCounter[WORKING_TABLES];
 } ScheduleState;
 
 #define SEGMENT_SIZE (sizeof(ScheduleState))
+
 /* querysched.c */
 
 extern QueryTableEntry *LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedstmt,
@@ -149,6 +157,8 @@ extern QueryTableEntry *LogQuery(HTAB *queryTable, ScheduleState *state, Planned
 extern void Reschedule(HTAB *queryTable, ScheduleState *state);
 extern void RemoveLoggedQuery(QueryDesc *queryDesc, HTAB *queryHashTable,
 							  ScheduleState *schedule_state);
+
+/* env_embedding.c */
 
 extern void log_table_access(ScheduleState * ss, Oid *affected_table);
 

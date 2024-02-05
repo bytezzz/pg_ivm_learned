@@ -51,13 +51,16 @@
 #include <unistd.h>
 #include <errno.h>
 
+/*
+	Macro to check if query order enforcement is needed,
+	Only enforce the top level , non-utility query and not in parallel worker.
+*/
 #define enable_enforce(level) (!IsParallelWorker() && (level) == 0 && !isUtility)
 
 PG_MODULE_MAGIC;
 
 static Oid pg_ivm_immv_id = InvalidOid;
 static Oid pg_ivm_immv_pkey_id = InvalidOid;
-int decision_server_socket = -1;
 
 static object_access_hook_type PrevObjectAccessHook = NULL;
 static shmem_request_hook_type PrevShmemRequestHook = NULL;
@@ -72,7 +75,13 @@ static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static ScheduleState *schedule_state = NULL;
 static HTAB *queryHashTable = NULL;
 
+
+/* This help to determine if current running query is a top-level query or not
+ * because these hooks are called recursively when a top-level query have sub queries. */
 static int nesting_level = 0;
+
+/*Socket of Python decision server*/
+int decision_server_socket = -1;
 
 /*
  * This is used to solve the problem of for-loop
@@ -111,14 +120,18 @@ void pg_hook_executor_end(QueryDesc *queryDesc);
 void pg_hook_process_utility(PlannedStmt *pstmt, const char *queryString, bool readOnlyTree,
 							 ProcessUtilityContext context, ParamListInfo params,
 							 QueryEnvironment *queryEnv, DestReceiver *dest, QueryCompletion *qc);
-extern void sendMsg(int sock, void* msg, uint32_t msgsize);
+
 
 /* SQL callable functions */
 PG_FUNCTION_INFO_V1(create_immv);
 PG_FUNCTION_INFO_V1(refresh_immv);
 PG_FUNCTION_INFO_V1(IVM_prevent_immv_change);
 PG_FUNCTION_INFO_V1(get_immv_def);
+
+/* learned ivm related funcs */
+extern void sendMsg(int sock, void *msg, uint32_t msgsize);
 void getLocksHeldByMe(StringInfo info);
+void finishQuery(QueryDesc *queryDesc);
 
 static inline void
 SetLocktagRelationOid(LOCKTAG *tag, Oid relid)
@@ -165,11 +178,10 @@ _PG_init(void)
 
 	elog(LOG, "Connecting to decision server");
 	decision_server_socket = socket(AF_INET, SOCK_STREAM, 0);
-	if (decision_server_socket < 0) {
+	if (decision_server_socket < 0)
+	{
 		printf("ERROR: Socket creation failed\n");
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("Socket creation failed")));
+		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE), errmsg("Socket creation failed")));
 	}
 
 	memset(&server_address, 0, sizeof(server_address));
@@ -177,11 +189,13 @@ _PG_init(void)
 	inet_pton(AF_INET, SERVERNAME, &server_address.sin_addr);
 	server_address.sin_port = htons(PORT);
 
-	if (connect(decision_server_socket, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
+	if (connect(decision_server_socket,
+				(struct sockaddr *) &server_address,
+				sizeof(server_address)) < 0)
+	{
 		printf("ERROR: Unable to connect to server\n");
 		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE),
-				 errmsg("Unable to connect to server")));
+				(errcode(ERRCODE_CONNECTION_FAILURE), errmsg("Unable to connect to server")));
 	}
 
 	elog(LOG, "Connected to %s", SERVERNAME);
@@ -189,12 +203,15 @@ _PG_init(void)
 	PrevObjectAccessHook = object_access_hook;
 	object_access_hook = PgIvmObjectAccessHook;
 
-	/* Install hooks on shared memory allocation, for query table T and Scheduling Result R. */
+	/* Install hooks on shared memory allocation
+	 * for necessary global data structures
+	 */
 	PrevShmemRequestHook = shmem_request_hook;
 	shmem_request_hook = pg_hook_shmem_request;
 	PrevShmemStartupHook = shmem_startup_hook;
 	shmem_startup_hook = pg_hook_shmem_startup;
 
+	/* Install hooks on planner and executor */
 	PrevPlanHook = planner_hook;
 	planner_hook = pg_hook_planner;
 
@@ -601,6 +618,7 @@ pg_hook_shmem_startup(void)
 	info.keysize = sizeof(QueryTableKey);
 	info.entrysize = sizeof(QueryTableEntry);
 
+	/*Initialize the hashtable in shared memory*/
 	queryHashTable =
 		ShmemInitHash("QueryTable", MAX_QUERY_NUM, MAX_QUERY_NUM, &info, HASH_ELEM | HASH_BLOBS);
 
@@ -631,6 +649,7 @@ void
 pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 {
 	int status, i, j, iter;
+	int running;
 	QueryTableEntry *query_entry;
 	RefedImmv *refed_immv;
 	LOCKTAG tag;
@@ -642,39 +661,51 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 	else
 		standard_ExecutorStart(queryDesc, eflags);
 
+	/* We only schedule top-level query, if a top-level query is allowed,
+	 *  sub-queries will also get executed.
+	 */
 	if (strcmp(queryDesc->sourceText, "") == 0 ||
 		//(eflags & (EXEC_FLAG_EXPLAIN_GENERIC | EXEC_FLAG_EXPLAIN_ONLY)) ||
-		(eflags & EXEC_FLAG_EXPLAIN_ONLY) ||
-		!enable_enforce(nesting_level))
+		(eflags & EXEC_FLAG_EXPLAIN_ONLY) || !enable_enforce(nesting_level))
 		return;
 
 	full_process++;
 
 	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
 
+	/* Log newly started query */
 	query_entry =
 		LogQuery(queryHashTable, schedule_state, queryDesc->plannedstmt, queryDesc->sourceText);
 
+	/*Trigger the reschedule*/
 	Reschedule(queryHashTable, schedule_state);
-
-	Assert(schedule_state->runningQuery >= 0 &&
-		   schedule_state->runningQuery <= MAX_CONCURRENT_QUERY);
 
 	LWLockRelease(schedule_state->lock);
 
 waiting:
 	for (;;)
 	{
-		int running;
+		/* Check for any interruptions, such as client disconnected */
+		if (INTERRUPTS_PENDING_CONDITION())
+		{
+			finishQuery(queryDesc);
+			ProcessInterrupts();
+		}
+
 		LWLockAcquire(schedule_state->lock, LW_SHARED);
 		status = query_entry->status;
 		running = schedule_state->runningQuery;
 		LWLockRelease(schedule_state->lock);
 
-		/* Check if no query is running and this query is also not available
-		 * If so, We trigger a rescheduling to wake it up.
+		if (status == QUERY_AVAILABLE)
+			break;
+
+		/*
+		 * Check if current environment is a "dead scenario"
+		 * "dead scenario" means no query is running, but there are still queries waiting.
+		 * If so, We trigger a rescheduling to wake a query up.
 		 */
-		if (running == 0 && status != QUERY_AVAILABLE)
+		if (running == 0)
 		{
 			LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
 			Reschedule(queryHashTable, schedule_state);
@@ -682,11 +713,15 @@ waiting:
 			LWLockRelease(schedule_state->lock);
 		}
 
-		if (status == QUERY_AVAILABLE)
-			break;
-
 		pg_usleep(30);
 	}
+
+	/*
+	 * Following process helps to avoid dead lock
+	 * Assume the query will affect table A, and table A is refed by Incremental Vives B and C.
+	 * Then we try to acquire locks on B and C toghether.
+	 * Maybe unnecessary, but actually help to avoid dead lock for naive algorithms.
+	*/
 
 	newlyLocked = NULL;
 
@@ -717,17 +752,25 @@ waiting:
 					UnlockRelationOid(iter, ExclusiveLock);
 				}
 				getLocksHeldByMe(&info);
+				elog(IVM_LOG_LEVEL,
+					"Failed to get all necessary locks to run xid %d, I'm holding %s.",
+					query_entry->xid,
+					info.data);
 				bms_free(newlyLocked);
 
 				LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
 				query_entry->status = QUERY_GIVE_UP;
 				schedule_state->runningQuery--;
+				Assert(schedule_state->runningQuery >= 0 &&
+					   schedule_state->runningQuery <= MAX_CONCURRENT_QUERY);
 				Reschedule(queryHashTable, schedule_state);
 				LWLockRelease(schedule_state->lock);
 				goto waiting;
 			}
 		}
 	}
+
+	/* Successful reaching here means the query are allowed to run for now. */
 
 	getLocksHeldByMe(&info);
 	elog(IVM_LOG_LEVEL,
@@ -736,8 +779,30 @@ waiting:
 		 info.data);
 
 	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
+
+	/* Update table access counter, as an environment feature*/
 	log_table_access(schedule_state, query_entry->affected_tables);
 	LWLockRelease(schedule_state->lock);
+}
+
+/*
+ * Finish a running query.
+ * Remove the query from the query hash table, update the status, and trigger a reschedule.
+*/
+void
+finishQuery(QueryDesc *queryDesc)
+{
+	nesting_level--;
+	Assert(nesting_level >= 0);
+	if (!(strcmp(queryDesc->sourceText, "") == 0) && enable_enforce(nesting_level) && full_process)
+	{
+		full_process--;
+		LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
+		RemoveLoggedQuery(queryDesc, queryHashTable, schedule_state);
+		schedule_state->runningQuery--;
+		Reschedule(queryHashTable, schedule_state);
+		LWLockRelease(schedule_state->lock);
+	}
 }
 
 void
@@ -753,40 +818,13 @@ pg_hook_executor_run(QueryDesc *queryDesc, ScanDirection direction, uint64 count
 	}
 	PG_CATCH();
 	{
-		nesting_level--;
-		Assert(nesting_level >= 0);
-		if (!(strcmp(queryDesc->sourceText, "") == 0) && enable_enforce(nesting_level) &&
-			full_process)
-		{
-			full_process--;
-			LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
-			schedule_state->runningQuery--;
-			RemoveLoggedQuery(queryDesc, queryHashTable, schedule_state);
-			Assert(schedule_state->runningQuery >= 0 &&
-				   schedule_state->runningQuery <= MAX_CONCURRENT_QUERY);
-			Reschedule(queryHashTable, schedule_state);
-			LWLockRelease(schedule_state->lock);
-		}
+		/* This make sure query will get droped if error occured (eg. wrong syntax) */
+		finishQuery(queryDesc);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
-	nesting_level--;
-
-	Assert(nesting_level >= 0);
-	if (!(strcmp(queryDesc->sourceText, "") == 0) && enable_enforce(nesting_level) && full_process)
-	{
-		full_process--;
-		LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
-		RemoveLoggedQuery(queryDesc, queryHashTable, schedule_state);
-		schedule_state->runningQuery--;
-		Reschedule(queryHashTable, schedule_state);
-
-		Assert(schedule_state->runningQuery >= 0 &&
-			   schedule_state->runningQuery <= MAX_CONCURRENT_QUERY);
-
-		LWLockRelease(schedule_state->lock);
-	}
+	finishQuery(queryDesc);
 }
 
 void

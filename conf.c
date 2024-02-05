@@ -1,3 +1,14 @@
+/*
+*
+* This file contains some hard-coded information about the tables and the IMMVs.
+* All these information can be extracted from the system catalog,
+* but for the sake of simplicity, we hard-code them here.
+*
+*
+**/
+
+
+
 #include "postgres.h"
 #include "conf.h"
 
@@ -37,6 +48,7 @@ getRefrenceImmv(Oid relOid)
 	return NULL;
 }
 
+/* Map the Table oid into a sequence starting with 0 */
 int getIndexForTableEmbeeding(Oid oid){
 	if (oid == customer)
 		return 1;

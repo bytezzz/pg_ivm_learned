@@ -1,4 +1,6 @@
 import os
+import sys
+import io
 import random
 import time
 from dataclasses import dataclass
@@ -13,21 +15,11 @@ import tyro
 from connector import *
 from torch.utils.tensorboard import SummaryWriter
 from typing import NamedTuple
-
-
-class DBReplayBufferSamples(NamedTuple):
-    env_observations: torch.Tensor
-    action_space_observations: torch.Tensor
-    next_env_observations: torch.Tensor
-    next_action_space_observations: torch.Tensor
-    actions: torch.Tensor
-    rewards: torch.Tensor
-    dones: torch.Tensor
-
-
-ACTION_FEATURE_SIZE = 1024
-ENV_FEATURE_SIZE = 17
-MAX_ACTION_NUM = 100
+import torch.multiprocessing as mp
+from concurrent_test import run_batch, requests_func
+from alive_progress import alive_bar
+import tqdm
+import psutil
 
 
 @dataclass
@@ -42,7 +34,7 @@ class Args:
     """if toggled, cuda will be enabled by default"""
     track: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
+    wandb_project_name: str = "ivm"
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
@@ -54,15 +46,15 @@ class Args:
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
-    env_id: str = "CartPole-v1"
+    env_id: str = "Postgresql_ivm-v1"
     """the id of the environment"""
-    total_timesteps: int = 500000
+    total_timesteps: int = 50000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    buffer_size: int = 1000
+    buffer_size: int = 800
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
@@ -78,32 +70,91 @@ class Args:
     """the ending epsilon for exploration"""
     exploration_fraction: float = 0.5
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
-    learning_starts: int = 1000
+    learning_starts: int = 800
     """timestep to start learning"""
-    train_frequency: int = 100
+    train_frequency: int = 250
     """the frequency of training"""
+    evalutate_frequency: int = 500
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
-    def thunk():
-        if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
-            env = gym.make(env_id)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env.action_space.seed(seed)
-
-        return env
-
-    return thunk
+ACTION_FEATURE_SIZE = 1024
+ENV_FEATURE_SIZE = 17
+MAX_ACTION_NUM = 100
 
 
-def fix_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.backends.cudnn.deterministic = Args.torch_deterministic
+class RequestsServer:
+    def __init__(self):
+        self.process = mp.Process(target=requests_func)
+
+    def start(self):
+        self.process.start()
+
+    def kill(self):
+        if not self.process.is_alive():
+            return
+
+        for child in psutil.Process(self.process.pid).children(recursive=True):
+            child.kill()
+
+        self.process.kill()
+        self.process = mp.Process(target=requests_func)
+
+        with alive_bar(
+            title="Waiting unfinished backend processes to exit",
+            spinner="classic",
+            bar=None,
+            monitor=False,
+            elapsed=True,
+            stats=False,
+        ):
+            while not os.system('ps -ef | grep "[p]ostgres: vscode" > null'):
+                time.sleep(0.5)
+
+
+class DecisionServer:
+    def __init__(self, engine, model):
+        self.process = mp.Process(target=self.decision_func, args=(engine, model))
+
+    def start(self):
+        self.process.start()
+
+    def stop(self):
+        self.process.kill()
+
+    def decision_func(self, engine, model):
+
+        # Important! Set the number of threads to 1 to avoid potential performance issues
+        torch.set_num_threads(1)
+
+        while True:
+            _, reqs = engine.fetch_req()
+            env_obs = (
+                torch.from_numpy(reqs.get_env_features())
+                .to(torch.float32)
+                .unsqueeze(dim=0)  # Add env dimension
+            )
+            action_obs = (
+                torch.from_numpy(reqs.get_action_features())
+                .to(torch.float32)
+                .unsqueeze(dim=0)  # Add env dimension
+            )
+            with torch.no_grad():
+                q_values = model(
+                    env_obs.unsqueeze(dim=0),  # Add batch dimension
+                    action_obs.unsqueeze(dim=0),  # Add batch dimension
+                )
+            actions = torch.argmax(q_values.squeeze(dim=0), dim=1).cpu().numpy()
+            reqs.make_decision(actions.flatten()[0])
+
+
+class DBReplayBufferSamples(NamedTuple):
+    env_observations: torch.Tensor
+    action_space_observations: torch.Tensor
+    next_env_observations: torch.Tensor
+    next_action_space_observations: torch.Tensor
+    actions: torch.Tensor
+    rewards: torch.Tensor
+    dones: torch.Tensor
 
 
 class DBReplayBuffer:
@@ -185,28 +236,18 @@ class DBReplayBuffer:
 
         return DBReplayBufferSamples(
             torch.from_numpy(self.env_observations[idxs]).to(self.device),
-
-            torch.from_numpy(
-                self.action_space_observations[
-                    idxs, :, :, :
-                ]
-            ).to(self.device),
+            torch.from_numpy(self.action_space_observations[idxs, :, :, :]).to(
+                self.device
+            ),
             torch.from_numpy(self.next_env_observations[idxs]).to(self.device),
-            torch.from_numpy(
-                self.next_action_space_observations[
-                    idxs, :, : , :
-                ]
-            ).to(self.device),
+            torch.from_numpy(self.next_action_space_observations[idxs, :, :, :]).to(
+                self.device
+            ),
             torch.from_numpy(self.actions[idxs]).to(self.device),
             torch.from_numpy(self.rewards[idxs]).to(self.device),
             torch.from_numpy(self.dones[idxs]).to(self.device),
         )
 
-    def _slice_select_valid(self, arr, idxs):
-        valid_elements = []
-        for i, idx in enumerate(idxs):
-            valid_elements.append(arr[i, :, : idx.item(), :])
-        return torch.cat(valid_elements, dim=2)
 
 # ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
@@ -265,20 +306,30 @@ class QNetwork(nn.Module):
         return q_values
 
 
+def fix_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = Args.torch_deterministic
+
+
 def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
     slope = (end_e - start_e) / duration
     return max(slope * t + start_e, end_e)
 
 
-if __name__ == "__main__":
-    import stable_baselines3 as sb3
+def evaluate_model(evaluate_func):
+    time_cost = mp.Value("d", 0.0)
+    evaluator = mp.Process(target=evaluate_func, args=(time_cost,))
 
-    if sb3.__version__ < "2.0":
-        raise ValueError(
-            """Ongoing migration: run the following command to install the new dependencies:
-poetry run pip install "stable_baselines3==2.0.0a1"
-"""
-        )
+    evaluator.start()
+    evaluator.join()
+
+    return time_cost.value
+
+
+if __name__ == "__main__":
+
     args = tyro.cli(Args)
 
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -309,6 +360,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
     q_network = QNetwork().to(device)
     optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
+    q_network.share_memory()
     target_network = QNetwork().to(device)
     target_network.load_state_dict(q_network.state_dict())
 
@@ -326,10 +378,21 @@ poetry run pip install "stable_baselines3==2.0.0a1"
     pg_engine = Engine()
     pg_engine.bind("localhost", 2300)
 
+    # make sure postgres is running
+    time.sleep(5)
+
+    requests_server = RequestsServer()
+    requests_server.start()
+
     reqs = pg_engine.fetch_req()
+
+    bar = tqdm.tqdm(
+        total=args.learning_starts, ncols=0, desc="Collecting initial experience"
+    )
 
     # TRY NOT TO MODIFY: start the game
     for global_step in range(args.total_timesteps):
+
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(
             args.start_e,
@@ -339,24 +402,24 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         )
 
         env_obs = (
-            torch.from_numpy(np.array(reqs.get_env_features()))
+            torch.from_numpy(reqs.get_env_features())
             .to(torch.float32)
             .to(device)
-            .unsqueeze(dim=0) # Add env dimension
+            .unsqueeze(dim=0)  # Add env dimension
         )
         action_obs = (
-            torch.from_numpy(np.array(reqs.get_action_features()))
+            torch.from_numpy(reqs.get_action_features())
             .to(torch.float32)
             .to(device)
-            .unsqueeze(dim=0) # Add env dimension
+            .unsqueeze(dim=0)  # Add env dimension
         )
 
         if random.random() < epsilon:
             actions = reqs.get_random_action()
         else:
             q_values = q_network(
-                env_obs.unsqueeze(dim=0), # Add batch dimension
-                action_obs.unsqueeze(dim=0), # Add batch dimension
+                env_obs.unsqueeze(dim=0),  # Add batch dimension
+                action_obs.unsqueeze(dim=0),  # Add batch dimension
             )
             actions = torch.argmax(q_values.squeeze(dim=0), dim=1).cpu().numpy()
 
@@ -383,43 +446,84 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
         # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
         reqs = next_reqs
+        bar.update(1)
+
+        if global_step < args.learning_starts:
+            continue
+
+        if global_step == args.learning_starts:
+            bar.close()
+            bar = tqdm.tqdm(total=args.evalutate_frequency, ncols=0, desc="Training")
 
         # ALGO LOGIC: training.
-        if global_step > args.learning_starts:
-            if global_step % args.train_frequency == 0:
-                data = rb.sample(args.batch_size)
-                with torch.no_grad():
-                    target_max, _ = target_network(data.next_env_observations, data.next_action_space_observations).max(dim=2)
-                    td_target = (data.rewards + args.gamma * target_max).squeeze()
-                old_val = q_network(data.env_observations, data.action_space_observations).gather(2, data.actions.unsqueeze(dim=2)).squeeze()
-                loss = F.mse_loss(td_target, old_val)
+        if global_step % args.train_frequency == 0:
+            data = rb.sample(args.batch_size)
 
-                if global_step % 100 == 0:
-                    writer.add_scalar("losses/td_loss", loss, global_step)
-                    writer.add_scalar(
-                        "losses/q_values", old_val.mean().item(), global_step
-                    )
-                    print("SPS:", int(global_step / (time.time() - start_time)))
-                    writer.add_scalar(
-                        "charts/SPS",
-                        int(global_step / (time.time() - start_time)),
-                        global_step,
-                    )
+            with torch.no_grad():
+                target_max, _ = target_network(
+                    data.next_env_observations,
+                    data.next_action_space_observations
+                ).max(dim=2)
+                td_target = (data.rewards + args.gamma * target_max).squeeze()
 
-                # optimize the model
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+            old_val = (
+                q_network(data.env_observations, data.action_space_observations)
+                .gather(2, data.actions.unsqueeze(dim=2))
+                .squeeze()
+            )
+            loss = F.mse_loss(td_target, old_val)
 
-            # update target network
-            if global_step % args.target_network_frequency == 0:
-                for target_network_param, q_network_param in zip(
-                    target_network.parameters(), q_network.parameters()
-                ):
-                    target_network_param.data.copy_(
-                        args.tau * q_network_param.data
-                        + (1.0 - args.tau) * target_network_param.data
-                    )
+            if global_step % 100 == 0:
+                writer.add_scalar("losses/td_loss", loss, global_step)
+                writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
+                print("SPS:", int(global_step / (time.time() - start_time)))
+                writer.add_scalar(
+                    "charts/SPS",
+                    int(global_step / (time.time() - start_time)),
+                    global_step,
+                )
+
+            # optimize the model
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        # update target network
+        if global_step % args.target_network_frequency == 0:
+            for target_network_param, q_network_param in zip(
+                target_network.parameters(), q_network.parameters()
+            ):
+                target_network_param.data.copy_(
+                    args.tau * q_network_param.data
+                    + (1.0 - args.tau) * target_network_param.data
+                )
+
+        if global_step % args.evalutate_frequency == 0:
+
+            # Since previous requests have benn fetched, we give a random action to make it continue
+            reqs.make_decision(reqs.get_random_action().flatten()[0])
+
+            # Start a decision server before stopping the benchmark server
+            # Or the requests will be blocked
+            decision_server = DecisionServer(pg_engine, q_network)
+            decision_server.start()
+            requests_server.kill()
+
+            pg_engine.flush()
+
+            print("Evaluating Model")
+            time_cost = evaluate_model(run_batch)
+            decision_server.stop()
+
+            print(f"Evaluate finish! Time Cost: {time_cost}")
+            writer.add_scalar("time_cost", time_cost, global_step)
+
+            # Restart the request server to continue the training
+            requests_server.start()
+            bar.reset()
+
+            # Drop previous reward due to the incorrect time interval
+            _, reqs = pg_engine.fetch_req()
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
