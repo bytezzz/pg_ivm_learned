@@ -32,7 +32,7 @@ def master(conn: psycopg.Connection, queue: Queue):
     while True:
         signal = queue.get()
         if signal == "shutdown":
-            print("Trying to close the connection")
+            #print("Trying to close the connection")
             try:
                 conn.cancel()
             except Exception as e:
@@ -45,7 +45,7 @@ def slave(conn, id, time_costs):
     time_before = time.time()
 
     try:
-        print(f"Process {id} is working")
+        #print(f"Process {id} is working")
         workloads[id](conn)
     except psycopg.errors.DeadlockDetected:
         print(f"Process {id} has been detected deadlock")
@@ -53,7 +53,9 @@ def slave(conn, id, time_costs):
         time_costs[id] = -1
         return
     except Exception as e:
-        print(f"Process {id} has been detected exception: {e}")
+        #print(f"Process {id} has been detected exception: {e}")
+        if "connection pointer is NULL" in str(e):
+            print(f"Worker {id} finished!")
         time_costs[id] = -1
         return
 
@@ -73,7 +75,7 @@ def worker(id, time_costs, queue):
         if master_thread.is_alive():
             queue.put("shutdown")
         master_thread.join()
-        print(f"Worker {id} has finished")
+        #print(f"Worker {id} has finished")
     except Exception as e:
         print(f"Worker {id} has been detected exception: {e}")
 
@@ -102,7 +104,7 @@ def run_batch(result, control_queue, stop=True):
     broadcast_threading.start()
 
     while True:
-        print("Restartiing ")
+        #print("Restartiing ")
 
         processes = [
             Process(target=worker, args=(i, time_costs, queues[i]))

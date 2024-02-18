@@ -697,6 +697,7 @@ waiting:
 		if (INTERRUPTS_PENDING_CONDITION())
 		{
 			LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
+			status = query_entry->status;
 			if (status == QUERY_AVAILABLE)
 			{
 				nesting_level++;

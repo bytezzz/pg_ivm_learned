@@ -37,7 +37,7 @@ class Args:
     """if toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "ivm"
     """the wandb's project name"""
-    wandb_entity: str = None
+    wandb_entity: str = ""
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
@@ -55,7 +55,7 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 1
     """the number of parallel game environments"""
-    buffer_size: int = 800
+    buffer_size: int = 2000
     """the replay memory buffer size"""
     gamma: float = 0.99
     """the discount factor gamma"""
@@ -71,11 +71,11 @@ class Args:
     """the ending epsilon for exploration"""
     exploration_fraction: float = 0.5
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
-    learning_starts: int = 800
+    learning_starts: int = 2000
     """timestep to start learning"""
-    train_frequency: int = 200
+    train_frequency: int = 80
     """the frequency of training"""
-    evalutate_frequency: int = 800
+    evalutate_frequency: int = 2000
 
 
 ACTION_FEATURE_SIZE = 1024
@@ -326,7 +326,6 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
 
 
 def evaluate_model(evaluate_func):
-    print("Trying to evaluate")
     time_cost = mp.Value("d", 0.0)
     control_queue = mp.Queue()
     evaluator = mp.Process(target=evaluate_func, args=(time_cost,control_queue, True))
@@ -335,6 +334,10 @@ def evaluate_model(evaluate_func):
     evaluator.join()
 
     return time_cost.value
+
+def save_model(q_network, model_path):
+    torch.save(q_network.state_dict(), model_path)
+    print(f"Model saved to {model_path}")
 
 
 if __name__ == "__main__":
@@ -465,7 +468,7 @@ if __name__ == "__main__":
             bar = tqdm.tqdm(total=args.evalutate_frequency, ncols=0, desc="Training")
 
         # ALGO LOGIC: training.
-        if global_step % args.train_frequency == 0:
+        if (global_step - args.learning_starts)  % args.train_frequency == 0:
             data = rb.sample(args.batch_size)
 
             with torch.no_grad():
@@ -482,15 +485,14 @@ if __name__ == "__main__":
             )
             loss = F.mse_loss(td_target, old_val)
 
-            if global_step % 100 == 0:
-                writer.add_scalar("losses/td_loss", loss, global_step)
-                writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
-                print("SPS:", int(global_step / (time.time() - start_time)))
-                writer.add_scalar(
-                    "charts/SPS",
-                    int(global_step / (time.time() - start_time)),
-                    global_step,
-                )
+            writer.add_scalar("losses/td_loss", loss, global_step)
+            writer.add_scalar("losses/q_values", old_val.mean().item(), global_step)
+            print("SPS:", int(global_step / (time.time() - start_time)))
+            writer.add_scalar(
+                "charts/SPS",
+                int(global_step / (time.time() - start_time)),
+                global_step,
+            )
 
             # optimize the model
             optimizer.zero_grad()
@@ -498,7 +500,7 @@ if __name__ == "__main__":
             optimizer.step()
 
         # update target network
-        if global_step % args.target_network_frequency == 0:
+        if (global_step - args.learning_starts) % args.target_network_frequency == 0:
             for target_network_param, q_network_param in zip(
                 target_network.parameters(), q_network.parameters()
             ):
@@ -507,7 +509,7 @@ if __name__ == "__main__":
                     + (1.0 - args.tau) * target_network_param.data
                 )
 
-        if global_step % args.evalutate_frequency == 0:
+        if (global_step - args.learning_starts) % args.evalutate_frequency == 0:
 
             # Since previous requests have benn fetched, we give a random action to make it continue
             reqs.make_decision(reqs.get_random_action().flatten()[0])
@@ -516,16 +518,24 @@ if __name__ == "__main__":
             # Or the requests will be blocked
             decision_server = DecisionServer(pg_engine, q_network, epsilon)
             decision_server.start()
+
+            # Stop the request server to avoid the interference
             requests_server.kill()
 
+            # Drop unfinished requests
             pg_engine.flush()
 
-            print("Evaluating Model")
+            # Evaluate the model
+            print("Evaluating")
             time_cost = evaluate_model(run_batch)
+
+            # Stop the decision server
             decision_server.stop()
 
-            print(f"Evaluate finish! Time Cost: {time_cost}")
-            writer.add_scalar("time_cost", time_cost, global_step)
+            print(f"Evaluation Finish! Time Cost: {time_cost}")
+            writer.add_scalar("test_time_cost", time_cost, global_step)
+
+            save_model(q_network, f"runs/{run_name}/{args.exp_name}.cleanrl_model")
 
             # Restart the request server to continue the training
             requests_server.start()
@@ -533,10 +543,5 @@ if __name__ == "__main__":
 
             # Drop previous reward due to the incorrect time interval
             _, reqs = pg_engine.fetch_req()
-
-    if args.save_model:
-        model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
-        torch.save(q_network.state_dict(), model_path)
-        print(f"model saved to {model_path}")
 
     writer.close()
