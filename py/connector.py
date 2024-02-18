@@ -87,7 +87,7 @@ class Engine:
             EnvFeatures.recv_and_unpack(self.csock).lru, dtype=np.float32
         )
 
-        # print(f"Received LRU: {np.array(env_features.lru)}")
+        #print(f"Received LRU: {np.array(env_features.lru)}")
 
         while payload_in := RequestEmbed.recv_and_unpack(self.csock):
             embedding = np.array(payload_in.embedding)
@@ -99,7 +99,7 @@ class Engine:
 
             tensor_lists.append(embedding)
 
-        # print("Received {:d} tensors".format(len(tensor_lists)))
+        #print("Received {:d} tensors".format(len(tensor_lists)))
 
         if not self.fired:
             self.fired = True

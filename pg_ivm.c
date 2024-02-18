@@ -50,6 +50,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <errno.h>
+#include <signal.h>
 
 /*
 	Macro to check if query order enforcement is needed,
@@ -131,7 +132,8 @@ PG_FUNCTION_INFO_V1(get_immv_def);
 /* learned ivm related funcs */
 extern void sendMsg(int sock, void *msg, uint32_t msgsize);
 void getLocksHeldByMe(StringInfo info);
-void finishQuery(QueryDesc *queryDesc);
+void finishRunningQuery(QueryDesc *queryDesc);
+void finishUnstartedQuery(QueryDesc *queryDesc);
 
 static inline void
 SetLocktagRelationOid(LOCKTAG *tag, Oid relid)
@@ -682,23 +684,38 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 
 	LWLockRelease(schedule_state->lock);
 
+	HOLD_INTERRUPTS();
 waiting:
 	for (;;)
 	{
-		/* Check for any interruptions, such as client disconnected */
-		if (INTERRUPTS_PENDING_CONDITION())
-		{
-			finishQuery(queryDesc);
-			ProcessInterrupts();
-		}
 
 		LWLockAcquire(schedule_state->lock, LW_SHARED);
 		status = query_entry->status;
 		running = schedule_state->runningQuery;
 		LWLockRelease(schedule_state->lock);
 
+		if (INTERRUPTS_PENDING_CONDITION())
+		{
+			LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
+			if (status == QUERY_AVAILABLE)
+			{
+				nesting_level++;
+				finishRunningQuery(queryDesc);
+			}else if (status == QUERY_BLOCKED || status == QUERY_GIVE_UP){
+				finishUnstartedQuery(queryDesc);
+			}else{
+				ereport(ERRCODE_SYSTEM_ERROR, errmsg("Unexpected query status: %d", status));
+			}
+			LWLockRelease(schedule_state->lock);
+			RESUME_INTERRUPTS();
+			ProcessInterrupts();
+		}
+
+		/* Check for any interruptions, such as client disconnected */
+
 		if (status == QUERY_AVAILABLE)
 			break;
+
 
 		/*
 		 * Check if current environment is a "dead scenario"
@@ -783,25 +800,42 @@ waiting:
 	/* Update table access counter, as an environment feature*/
 	log_table_access(schedule_state, query_entry->affected_tables);
 	LWLockRelease(schedule_state->lock);
+	RESUME_INTERRUPTS();
+}
+
+void
+finishUnstartedQuery(QueryDesc *queryDesc)
+{
+	elog(LOG, "Unstarted Query: nesting_level: %d, full_process: %d", nesting_level, full_process);
+	if (!(strcmp(queryDesc->sourceText, "") == 0) && enable_enforce(nesting_level) && full_process)
+	{
+		full_process--;
+		Assert(full_process >= 0);
+		RemoveLoggedQuery(queryDesc, queryHashTable, schedule_state);
+		Reschedule(queryHashTable, schedule_state);
+		elog(LOG, "I'm fine to exit");
+	}else{
+		elog(LOG, "Not removing query from hash table");
+	}
 }
 
 /*
  * Finish a running query.
  * Remove the query from the query hash table, update the status, and trigger a reschedule.
 */
-void
-finishQuery(QueryDesc *queryDesc)
+void finishRunningQuery(QueryDesc *queryDesc)
 {
 	nesting_level--;
 	Assert(nesting_level >= 0);
 	if (!(strcmp(queryDesc->sourceText, "") == 0) && enable_enforce(nesting_level) && full_process)
 	{
 		full_process--;
-		LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
+		Assert(full_process >= 0);
 		RemoveLoggedQuery(queryDesc, queryHashTable, schedule_state);
 		schedule_state->runningQuery--;
 		Reschedule(queryHashTable, schedule_state);
-		LWLockRelease(schedule_state->lock);
+	}else{
+		elog(LOG, "Not removing query from hash table");
 	}
 }
 
@@ -819,12 +853,15 @@ pg_hook_executor_run(QueryDesc *queryDesc, ScanDirection direction, uint64 count
 	PG_CATCH();
 	{
 		/* This make sure query will get droped if error occured (eg. wrong syntax) */
-		finishQuery(queryDesc);
+		LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
+		finishRunningQuery(queryDesc);
+		LWLockRelease(schedule_state->lock);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-
-	finishQuery(queryDesc);
+	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
+	finishRunningQuery(queryDesc);
+	LWLockRelease(schedule_state->lock);
 }
 
 void
@@ -846,6 +883,7 @@ getLocksHeldByMe(StringInfo info)
 void
 pg_hook_execution_finish(QueryDesc *queryDesc)
 {
+	elog(LOG,"execution finish: %s", queryDesc->sourceText);
 	if (PrevExecutionFinishHook)
 		PrevExecutionFinishHook(queryDesc);
 	else
@@ -855,6 +893,7 @@ pg_hook_execution_finish(QueryDesc *queryDesc)
 void
 pg_hook_executor_end(QueryDesc *queryDesc)
 {
+	elog(LOG,"executor end: %s", queryDesc->sourceText);
 	if (PrevExecutionEndHook)
 		PrevExecutionEndHook(queryDesc);
 	else

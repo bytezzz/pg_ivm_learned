@@ -701,7 +701,7 @@ IVM_immediate_before(PG_FUNCTION_ARGS)
 	else
 		LockRelationOid(matviewOid, RowExclusiveLock);
 
-	elog(IVM_LOG_LEVEL, "Pid %d: IVM_immediate_before: Locking matviewOid: %d", MyProcPid, matviewOid);
+	//elog(IVM_LOG_LEVEL, "Pid %d: IVM_immediate_before: Locking matviewOid: %d", MyProcPid, matviewOid);
 
 	/*
 	 * On the first call initialize the hashtable

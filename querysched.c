@@ -104,11 +104,12 @@ LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedStmt, const
 	int oidIndex;
 	bool found;
 	QueryTableEntry *query_entry;
-	ListCell *roid;
+	ListCell *curr;
 	QueryTableKey key;
 	int effective_index = 0;
 	double *tensor;
 	int table_one_hot_index;
+	RangeTblEntry *modifyingRelation;
 
 	if (state->querynum >= MAX_QUERY_NUM)
 		ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Too many queries in the system")));
@@ -152,16 +153,19 @@ LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedStmt, const
 	tensor[6] = plannedStmt->parallelModeNeeded;
 
 	oidIndex = 0;
-	foreach (roid, plannedStmt->relationOids)
+	foreach (curr, plannedStmt->resultRelations)
 	{
+		modifyingRelation = rt_fetch(lfirst_oid(curr), plannedStmt->rtable);
+
 		if (oidIndex > MAX_AFFECTED_TABLE)
 		{
 			elog(ERROR, "Too many affected tables for query: %s", query_string);
 		}
-		query_entry->affected_tables[oidIndex++] = lfirst_oid(roid);
+
+		query_entry->affected_tables[oidIndex++] = modifyingRelation->relid;
 
 		/* One hot encoding for accessed tables */
-		table_one_hot_index = getIndexForTableEmbeeding(lfirst_oid(roid));
+		table_one_hot_index = getIndexForTableEmbeeding(lfirst_oid(curr));
 
 		tensor[table_one_hot_index + 7] = 1;
 	}
@@ -220,6 +224,10 @@ Reschedule(HTAB *queryTable, ScheduleState *state)
 	 * requests should always outnumber resources.
 	 * Therefore, this function will be called whenever a new slot becomes available.
 	 **/
+
+	elog(LOG, "Rescheduling, %d queries are running, %d queries logged",
+		 state->runningQuery,
+		 state->querynum);
 
 	if (avaliable == 1)
 	{
@@ -327,6 +335,8 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state)
 
 		decision = recvDecision();
 		elog(LOG, "Received decision: %d", decision);
+	}else{
+		elog(LOG, "Only one query is available, start it directly.");
 	}
 
 	/* Start the picked query */
@@ -335,6 +345,7 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state)
 	query_entry->start_time = clock();
 
 	state->runningQuery++;
+	elog(LOG, "Starting pid:%d, currently have %d runningQuery", query_entry->key.pid, state->runningQuery);
 }
 
 typedef struct TableRef
@@ -420,6 +431,7 @@ RescheduleUseHotTableFirst(HTAB *queryTable, ScheduleState *state)
 		{
 			query_entry->status = QUERY_AVAILABLE;
 			state->runningQuery++;
+			elog(LOG, "Starting pid:%d, currently have %d runningQuery", query_entry->key.pid, state->runningQuery);
 			avaliable = MAX_CONCURRENT_QUERY - state->runningQuery;
 		}
 		else if (query_entry->status == QUERY_GIVE_UP)
@@ -510,6 +522,7 @@ RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state)
 			allowed++;
 			query_entry->status = QUERY_AVAILABLE;
 			state->runningQuery++;
+			elog(LOG, "Starting pid:%d, currently have %d runningQuery", query_entry->key.pid, state->runningQuery);
 		}
 		else if (query_entry->status == QUERY_GIVE_UP)
 		{

@@ -79,7 +79,7 @@ extern void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 #define PORT  2300
 
 /*ivm related log level*/
-#define IVM_LOG_LEVEL DEBUG1
+#define IVM_LOG_LEVEL LOG
 
 enum query_staus{
 

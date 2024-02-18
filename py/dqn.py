@@ -1,4 +1,5 @@
 import os
+import threading
 import sys
 import io
 import random
@@ -16,7 +17,7 @@ from connector import *
 from torch.utils.tensorboard import SummaryWriter
 from typing import NamedTuple
 import torch.multiprocessing as mp
-from concurrent_test import run_batch, requests_func
+from concurrent_test import run_batch
 from alive_progress import alive_bar
 import tqdm
 import psutil
@@ -72,9 +73,9 @@ class Args:
     """the fraction of `total-timesteps` it takes from start-e to go end-e"""
     learning_starts: int = 800
     """timestep to start learning"""
-    train_frequency: int = 250
+    train_frequency: int = 200
     """the frequency of training"""
-    evalutate_frequency: int = 500
+    evalutate_frequency: int = 800
 
 
 ACTION_FEATURE_SIZE = 1024
@@ -84,20 +85,18 @@ MAX_ACTION_NUM = 100
 
 class RequestsServer:
     def __init__(self):
-        self.process = mp.Process(target=requests_func)
+        self.control_queue = mp.Queue()
+        self.result = mp.Value("d", 0.0)
+        self.bootstrap_process = mp.Process(target=run_batch, args=(self.result, self.control_queue, False))
 
     def start(self):
-        self.process.start()
+        self.bootstrap_process.start()
 
     def kill(self):
-        if not self.process.is_alive():
+        if not self.bootstrap_process.is_alive():
             return
 
-        for child in psutil.Process(self.process.pid).children(recursive=True):
-            child.kill()
-
-        self.process.kill()
-        self.process = mp.Process(target=requests_func)
+        self.control_queue.put("shutdown")
 
         with alive_bar(
             title="Waiting unfinished backend processes to exit",
@@ -107,13 +106,18 @@ class RequestsServer:
             elapsed=True,
             stats=False,
         ):
-            while not os.system('ps -ef | grep "[p]ostgres: vscode" > null'):
-                time.sleep(0.5)
+            self.bootstrap_process.join()
+            #while not os.system('ps -ef | grep "[p]ostgres: vscode" > /dev/null'):
+            #    time.sleep(0.5)
+
+        self.control_queue = mp.Queue()
+        self.bootstrap_process = mp.Process(target=run_batch, args=(self.result, self.control_queue, False))
 
 
 class DecisionServer:
-    def __init__(self, engine, model):
+    def __init__(self, engine, model, epsilon):
         self.process = mp.Process(target=self.decision_func, args=(engine, model))
+        self.epsilon = epsilon
 
     def start(self):
         self.process.start()
@@ -128,22 +132,25 @@ class DecisionServer:
 
         while True:
             _, reqs = engine.fetch_req()
-            env_obs = (
-                torch.from_numpy(reqs.get_env_features())
-                .to(torch.float32)
-                .unsqueeze(dim=0)  # Add env dimension
-            )
-            action_obs = (
-                torch.from_numpy(reqs.get_action_features())
-                .to(torch.float32)
-                .unsqueeze(dim=0)  # Add env dimension
-            )
-            with torch.no_grad():
-                q_values = model(
-                    env_obs.unsqueeze(dim=0),  # Add batch dimension
-                    action_obs.unsqueeze(dim=0),  # Add batch dimension
+            if random.random() < epsilon:
+                actions = reqs.get_random_action()
+            else:
+                env_obs = (
+                    torch.from_numpy(reqs.get_env_features())
+                    .to(torch.float32)
+                    .unsqueeze(dim=0)  # Add env dimension
                 )
-            actions = torch.argmax(q_values.squeeze(dim=0), dim=1).cpu().numpy()
+                action_obs = (
+                    torch.from_numpy(reqs.get_action_features())
+                    .to(torch.float32)
+                    .unsqueeze(dim=0)  # Add env dimension
+                )
+                with torch.no_grad():
+                    q_values = model(
+                        env_obs.unsqueeze(dim=0),  # Add batch dimension
+                        action_obs.unsqueeze(dim=0),  # Add batch dimension
+                    )
+                actions = torch.argmax(q_values.squeeze(dim=0), dim=1).cpu().numpy()
             reqs.make_decision(actions.flatten()[0])
 
 
@@ -319,8 +326,10 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
 
 
 def evaluate_model(evaluate_func):
+    print("Trying to evaluate")
     time_cost = mp.Value("d", 0.0)
-    evaluator = mp.Process(target=evaluate_func, args=(time_cost,))
+    control_queue = mp.Queue()
+    evaluator = mp.Process(target=evaluate_func, args=(time_cost,control_queue, True))
 
     evaluator.start()
     evaluator.join()
@@ -505,7 +514,7 @@ if __name__ == "__main__":
 
             # Start a decision server before stopping the benchmark server
             # Or the requests will be blocked
-            decision_server = DecisionServer(pg_engine, q_network)
+            decision_server = DecisionServer(pg_engine, q_network, epsilon)
             decision_server.start()
             requests_server.kill()
 
