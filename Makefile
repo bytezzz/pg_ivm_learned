@@ -7,10 +7,14 @@ OBJS = \
 	createas.o \
 	matview.o \
 	pg_ivm.o \
+	bao_planner.o \
+	bao_cacheinfo.o \
 	ruleutils.o \
 	subselect.o \
 	querysched.o \
 	env_embedding.o \
+	utils.o \
+	cJSON.o \
 	conf.o
 PGFILEDESC = "pg_ivm - incremental view maintenance on PostgreSQL"
 
@@ -25,6 +29,9 @@ REGRESS = pg_ivm create_immv refresh_immv
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+
+CFLAGS += -lczmq -lzmq
+LDFLAGS += -lczmq -lzmq
 
 # Define the path variable
 PG_PATH ?= /workspaces/LearnedIVM/pgdata

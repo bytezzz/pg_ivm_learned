@@ -83,6 +83,8 @@ static int nesting_level = 0;
 
 /*Socket of Python decision server*/
 int decision_server_socket = -1;
+void *requester = NULL;
+void *context = NULL;
 
 /*
  * This is used to solve the problem of for-loop
@@ -172,33 +174,13 @@ IvmSubXactCallback(SubXactEvent event, SubTransactionId mySubid, SubTransactionI
 void
 _PG_init(void)
 {
-	struct sockaddr_in server_address;
-
 	elog(LOG, "Initializing PG_LEARNED_IVM");
 	RegisterXactCallback(IvmXactCallback, NULL);
 	RegisterSubXactCallback(IvmSubXactCallback, NULL);
 
 	elog(LOG, "Connecting to decision server");
-	decision_server_socket = socket(AF_INET, SOCK_STREAM, 0);
-	if (decision_server_socket < 0)
-	{
-		printf("ERROR: Socket creation failed\n");
-		ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE), errmsg("Socket creation failed")));
-	}
 
-	memset(&server_address, 0, sizeof(server_address));
-	server_address.sin_family = AF_INET;
-	inet_pton(AF_INET, SERVERNAME, &server_address.sin_addr);
-	server_address.sin_port = htons(PORT);
-
-	if (connect(decision_server_socket,
-				(struct sockaddr *) &server_address,
-				sizeof(server_address)) < 0)
-	{
-		printf("ERROR: Unable to connect to server\n");
-		ereport(ERROR,
-				(errcode(ERRCODE_CONNECTION_FAILURE), errmsg("Unable to connect to server")));
-	}
+	//decision_server_socket = connect_to_server(SERVERNAME, PORT);
 
 	elog(LOG, "Connected to %s", SERVERNAME);
 
@@ -657,6 +639,9 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 	LOCKTAG tag;
 	Bitmapset *newlyLocked = NULL;
 	StringInfoData info;
+	bool found;
+	env_features env;
+
 
 	if (PrevExecutionStartHook)
 		PrevExecutionStartHook(queryDesc, eflags);
@@ -675,12 +660,26 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 
 	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
 
-	/* Log newly started query */
-	query_entry =
-		LogQuery(queryHashTable, schedule_state, queryDesc->plannedstmt, queryDesc->sourceText);
+	if (schedule_state->querynum >= MAX_QUERY_NUM)
+		ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Too many queries in the system")));
 
+	query_entry = GetEntry(queryHashTable, queryDesc,HASH_ENTER, &found);
+
+	if (found)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_DUPLICATE_OBJECT),
+				 errmsg("Found duplicate entry key, query_string: %s, previous query_string: %s",
+						queryDesc->sourceText,
+						query_entry->key.query_string)));
+	}
+
+	LogQuery(schedule_state, queryDesc, query_entry);
+
+	env.wakeup_decision_id = -1;
+	memcpy(env.LRU, schedule_state->tableAccessCounter, sizeof(int) * WORKING_TABLES);
 	/*Trigger the reschedule*/
-	Reschedule(queryHashTable, schedule_state);
+	Reschedule(queryHashTable, schedule_state, INCOMING_QUERY, &env);
 
 	LWLockRelease(schedule_state->lock);
 
@@ -726,7 +725,9 @@ waiting:
 		if (running == 0)
 		{
 			LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
-			Reschedule(queryHashTable, schedule_state);
+			env.wakeup_decision_id = -1;
+			memcpy(env.LRU, schedule_state->tableAccessCounter, sizeof(int) * WORKING_TABLES);
+			Reschedule(queryHashTable, schedule_state, DEAD_WAKEUP, &env);
 			status = query_entry->status;
 			LWLockRelease(schedule_state->lock);
 		}
@@ -781,7 +782,10 @@ waiting:
 				schedule_state->runningQuery--;
 				Assert(schedule_state->runningQuery >= 0 &&
 					   schedule_state->runningQuery <= MAX_CONCURRENT_QUERY);
-				Reschedule(queryHashTable, schedule_state);
+
+				env.wakeup_decision_id = query_entry->wakeup_by;
+				memcpy(env.LRU, schedule_state->tableAccessCounter, sizeof(int) * WORKING_TABLES);
+				Reschedule(queryHashTable, schedule_state, QUERY_GIVEUP, &env);
 				LWLockRelease(schedule_state->lock);
 				goto waiting;
 			}
@@ -807,13 +811,29 @@ waiting:
 void
 finishUnstartedQuery(QueryDesc *queryDesc)
 {
+	QueryTableEntry *query;
+	bool found;
+	env_features env;
+
 	elog(LOG, "Unstarted Query: nesting_level: %d, full_process: %d", nesting_level, full_process);
 	if (!(strcmp(queryDesc->sourceText, "") == 0) && enable_enforce(nesting_level) && full_process)
 	{
 		full_process--;
 		Assert(full_process >= 0);
-		RemoveLoggedQuery(queryDesc, queryHashTable, schedule_state);
-		Reschedule(queryHashTable, schedule_state);
+		query = GetEntry(queryHashTable, queryDesc, HASH_FIND, &found);
+		if (!found || query == NULL)
+		{
+			elog(IVM_LOG_LEVEL, "Pid:%d: Cannot find Query:%s", MyProcPid, queryDesc->sourceText);
+			return;
+		}
+
+		env.wakeup_decision_id = query->wakeup_by;
+		memcpy(env.LRU, schedule_state->tableAccessCounter, sizeof(int) * WORKING_TABLES);
+
+		GetEntry(queryHashTable, queryDesc, HASH_REMOVE, &found);
+		UpdateStateForRemoving(schedule_state, queryDesc, query, false);
+
+		Reschedule(queryHashTable, schedule_state, QUERY_FINISHED, &env);
 		elog(LOG, "I'm fine to exit");
 	}else{
 		elog(LOG, "Not removing query from hash table");
@@ -826,15 +846,32 @@ finishUnstartedQuery(QueryDesc *queryDesc)
 */
 void finishRunningQuery(QueryDesc *queryDesc)
 {
+	env_features env;
+	QueryTableEntry *query;
+	bool found;
+
 	nesting_level--;
 	Assert(nesting_level >= 0);
 	if (!(strcmp(queryDesc->sourceText, "") == 0) && enable_enforce(nesting_level) && full_process)
 	{
 		full_process--;
 		Assert(full_process >= 0);
-		RemoveLoggedQuery(queryDesc, queryHashTable, schedule_state);
-		schedule_state->runningQuery--;
-		Reschedule(queryHashTable, schedule_state);
+
+		query = GetEntry(queryHashTable, queryDesc, HASH_FIND, &found);
+
+		if (!found || query == NULL)
+		{
+			elog(IVM_LOG_LEVEL, "Pid:%d: Cannot find Query:%s", MyProcPid, queryDesc->sourceText);
+			return;
+		}
+
+		env.wakeup_decision_id = query->wakeup_by;
+		memcpy(env.LRU, schedule_state->tableAccessCounter, sizeof(int) * WORKING_TABLES);
+
+
+		query = GetEntry(queryHashTable, queryDesc, HASH_REMOVE, &found);
+		UpdateStateForRemoving(schedule_state, queryDesc, query, true);
+		Reschedule(queryHashTable, schedule_state, QUERY_FINISHED, &env);
 	}else{
 		elog(LOG, "Not removing query from hash table");
 	}

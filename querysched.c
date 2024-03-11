@@ -11,6 +11,7 @@
 #include "nodes/nodes.h"
 
 #include "pg_ivm.h"
+#include "cJSON.h"
 #include <netinet/in.h>
 #include <resolv.h>
 #include <sys/socket.h>
@@ -18,117 +19,62 @@
 #include <unistd.h>
 #include <errno.h>
 
-#pragma pack(1)
 
-typedef struct payload_t
-{
-	double embedding[1024];
-} query_embed;
 
-typedef struct response_t
-{
-	uint32_t decision;
-} response;
-
-typedef struct env_features_t
-{
-	int LRU[WORKING_TABLES];
-} env_features;
-
-#pragma pack()
-
+static void *context;
+static void *requester;
 extern int decision_server_socket;
 extern int getIndexForTableEmbeeding(Oid oid);
 
-void RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state);
-void RescheduleRandomly(HTAB *queryTable, ScheduleState *state);
-void RescheduleUseHotTableFirst(HTAB *queryTable, ScheduleState *state);
-void RescheduleWithServer(HTAB *queryTable, ScheduleState *state);
+void RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state, env_features *env_features);
+void RescheduleRandomly(HTAB *queryTable, ScheduleState *state, env_features *env_features);
+void RescheduleUseHotTableFirst(HTAB *queryTable, ScheduleState *state, env_features *env_features);
+void RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_features);
 int embed_plan_node(double *tensor, Plan *plan, int start);
-void sendMsg(int sock, void *msg, uint32_t msgsize);
-void sendRequest(QueryTableEntry *qte);
-uint32 recvDecision(void);
+response recvDecision(void);
+static void connect_zmq();
 
-/* Send DataStructure through socket. */
-void
-sendMsg(int sock, void *msg, uint32_t msgsize)
-{
-	if (write(sock, msg, msgsize) < 0)
-	{
-		ereport(ERROR, (errcode(ERRCODE_IO_ERROR), errmsg("Can't send message.")));
-		close(sock);
-	}
-	return;
-}
 
-/*. Send Query Embedding through socket. */
-inline void
-sendRequest(QueryTableEntry *qte)
+static void connect_zmq()
 {
-	sendMsg(decision_server_socket, qte->embedding, sizeof(query_embed));
+	context = zmq_ctx_new();
+	requester = zmq_socket(context, ZMQ_REQ);
+	zmq_connect(requester, "tcp://localhost:5555");
 }
 
 /* Receive a decision from decision server. */
-uint32
+response
 recvDecision(void)
 {
-	uint32_t decision;
-	ssize_t nread;
+	char buffer[256];
+	cJSON *root;
+	response response;
 
-	nread = read(decision_server_socket, &decision, sizeof(uint32_t));
-	if (nread == 0)
-	{
-		elog(ERROR, "Connection closed by server.");
-		close(decision_server_socket);
-	}
-	else if (nread < 0)
-	{
-		elog(ERROR, "Error reading from server.");
-		close(decision_server_socket);
-	}
-	else if (nread != sizeof(uint32_t))
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_IO_ERROR), errmsg("Can't receive the decision from server.")));
-		close(decision_server_socket);
-	}
-	elog(IVM_LOG_LEVEL, "Received decision: %d", decision);
+	zmq_recv(requester, &buffer, 256, 0);
+	root = cJSON_Parse(buffer);
+	response.decision = cJSON_GetObjectItem(root, "decision")->valueint;
+	response.decision_id = cJSON_GetObjectItem(root, "decision_id")->valueint;
 
-	return decision;
+	elog(IVM_LOG_LEVEL, "Received decision: %d", response.decision);
+	return response;
 }
 
 /* Log necessary information of a given query into the global data structure. */
-QueryTableEntry *
-LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedStmt, const char *query_string)
+void
+LogQuery(ScheduleState *state, QueryDesc *desc, QueryTableEntry *query_entry)
 {
-	int oidIndex;
-	bool found;
-	QueryTableEntry *query_entry;
-	ListCell *curr;
-	QueryTableKey key;
-	int effective_index = 0;
-	double *tensor;
-	int table_one_hot_index;
-	RangeTblEntry *modifyingRelation;
+	//int oidIndex;
+	//ListCell *curr;
+	//int effective_index = 0;
+	//double *tensor;
+	//int table_one_hot_index;
+	//RangeTblEntry *modifyingRelation;
+	PlannedStmt *plannedStmt;
+	const char * query_string;
+	char *json_plan;
 
-	if (state->querynum >= MAX_QUERY_NUM)
-		ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("Too many queries in the system")));
-
-	/* Set up the key to query the hashtable.*/
-	memset(&key, 0, sizeof(QueryTableKey));
-	key.pid = MyProcPid;
-	strcpy(key.query_string, query_string);
-
-	query_entry = (QueryTableEntry *) hash_search(queryTable, &key, HASH_ENTER, &found);
-
-	if (found)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_DUPLICATE_OBJECT),
-				 errmsg("Found duplicate entry key, query_string: %s, previous query_string: %s",
-						query_string,
-						query_entry->key.query_string)));
-	}
+	plannedStmt = desc->plannedstmt;
+	query_string = desc->sourceText;
 
 	/* Copy information.*/
 	memset(query_entry, 0, sizeof(QueryTableEntry));
@@ -140,70 +86,27 @@ LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedStmt, const
 	state->querynum++;
 
 	elog(IVM_LOG_LEVEL, "Logging Transactionid: %u", query_entry->xid);
+	json_plan = plan_to_json(plannedStmt);
+	strcpy(query_entry->query_plan_json, json_plan);
 
-	/*Embed the query plan*/
-	tensor = query_entry->embedding;
+	free(json_plan);
 
-	tensor[0] = plannedStmt->commandType;
-	tensor[1] = plannedStmt->hasReturning;
-	tensor[2] = plannedStmt->hasModifyingCTE;
-	tensor[3] = plannedStmt->canSetTag;
-	tensor[4] = plannedStmt->transientPlan;
-	tensor[5] = plannedStmt->dependsOnRole;
-	tensor[6] = plannedStmt->parallelModeNeeded;
-
-	oidIndex = 0;
-	foreach (curr, plannedStmt->resultRelations)
-	{
-		modifyingRelation = rt_fetch(lfirst_oid(curr), plannedStmt->rtable);
-
-		if (oidIndex > MAX_AFFECTED_TABLE)
-		{
-			elog(ERROR, "Too many affected tables for query: %s", query_string);
-		}
-
-		query_entry->affected_tables[oidIndex++] = modifyingRelation->relid;
-
-		/* One hot encoding for accessed tables */
-		table_one_hot_index = getIndexForTableEmbeeding(lfirst_oid(curr));
-
-		tensor[table_one_hot_index + 7] = 1;
-	}
-
-	/* Embed the query plan tree */
-	effective_index = embed_plan_node(tensor, plannedStmt->planTree, 7 + WORKING_TABLES);
-
-	/* Fill the rest of the tensor with NaN */
-	memset(&tensor[effective_index], -1, (QUERY_EMBEDDING_SIZE - effective_index) * sizeof(double));
-
-	return query_entry;
+	return;
 }
 
 /* Remove a query from the Global Hashtable.*/
 void
-RemoveLoggedQuery(QueryDesc *queryDesc, HTAB *queryHashTable, ScheduleState *schedule_state)
+UpdateStateForRemoving(ScheduleState *state, QueryDesc *desc, QueryTableEntry *query_entry, bool is_running)
 {
-	QueryTableEntry *query;
-	bool found;
-	QueryTableKey key;
+	elog(IVM_LOG_LEVEL, "Removing Query xid:%d", query_entry->xid);
 
-	memset(&key, 0, sizeof(QueryTableKey));
-	key.pid = MyProcPid;
-	strcpy(key.query_string, queryDesc->sourceText);
-
-	query = hash_search(queryHashTable, &key, HASH_REMOVE, &found);
-
-	if (!found || query == NULL)
-	{
-		elog(IVM_LOG_LEVEL, "Pid:%d: Cannot find Query:%s", MyProcPid, queryDesc->sourceText);
-		return;
+	state->querynum--;
+	if (is_running){
+		state->runningQuery--;
 	}
 
-	elog(IVM_LOG_LEVEL, "Removing Query xid:%d", query->xid);
-	schedule_state->querynum--;
-
-	Assert(schedule_state->runningQuery >= 0 &&
-		   schedule_state->runningQuery <= MAX_CONCURRENT_QUERY);
+	Assert(state->runningQuery >= 0 &&
+		   state->runningQuery <= MAX_CONCURRENT_QUERY);
 }
 
 /*
@@ -213,10 +116,12 @@ RemoveLoggedQuery(QueryDesc *queryDesc, HTAB *queryHashTable, ScheduleState *sch
  *
  */
 void
-Reschedule(HTAB *queryTable, ScheduleState *state)
+Reschedule(HTAB *queryTable, ScheduleState *state, ScheduleTag tag, env_features *env_features)
 {
 	int avaliable;
 	avaliable = MAX_CONCURRENT_QUERY - state->runningQuery;
+
+	env_features->schedule_tag = tag;
 
 	/*
 	 * The current implementation of RL algorithms can only make one decision at a time.
@@ -229,69 +134,42 @@ Reschedule(HTAB *queryTable, ScheduleState *state)
 		 state->runningQuery,
 		 state->querynum);
 
-	if (avaliable == 1)
+	if (true || avaliable == 1)
 	{
-		RescheduleWithServer(queryTable, state);
+		RescheduleWithServer(queryTable, state, env_features);
 	}
 	else
 	{
-		RescheduleUseMinTableAffected(queryTable, state);
+		RescheduleUseMinTableAffected(queryTable, state, env_features);
 	}
 	Assert(state->runningQuery >= 0 && state->runningQuery <= MAX_CONCURRENT_QUERY);
 }
 
-/* Embed a plan tree node */
-int
-embed_plan_node(double *tensor, Plan *plan, int start)
-{
-	int return_index = 0;
-
-	if (start > QUERY_EMBEDDING_SIZE - 8)
-	{
-		elog(ERROR, "Query embedding size is too small");
-		return start;
-	}
-
-	/* not using one-hot encoding here, becuase there are too many(~40) plan node types */
-	tensor[start] = nodeTag(plan);
-
-	/* embed the common sharing features of all kinds of query plan node */
-	tensor[start + 1] = plan->startup_cost;
-	tensor[start + 2] = plan->total_cost;
-	tensor[start + 3] = plan->plan_rows;
-	tensor[start + 4] = plan->plan_width;
-	tensor[start + 5] = plan->parallel_aware;
-	tensor[start + 6] = plan->parallel_safe;
-	tensor[start + 7] = plan->async_capable;
-
-	return_index = start + 8;
-
-	/* Recursively embed rest plan nodes */
-	if (plan->lefttree)
-		return_index = embed_plan_node(tensor, plan->lefttree, start + 8);
-	if (plan->righttree)
-		return_index = embed_plan_node(tensor, plan->righttree, start + 8 + 8);
-
-	return return_index;
-}
-
 /* Start query execution based on the decisions made by the remote server */
 void
-RescheduleWithServer(HTAB *queryTable, ScheduleState *state)
+RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_features)
 {
 	HASH_SEQ_STATUS status;
 	QueryTableEntry *query_entry;
 	int available_num;
-	uint32_t decision = 0;
+	response decision;
 	List *listing = NIL;
 	ListCell *curr = NULL;
-	static double endTensor[QUERY_EMBEDDING_SIZE];
 	int giving_up = 0;
+	cJSON *query;
+	cJSON *plans;
+	cJSON *parsed_plan;
+	char *str;
 
 	available_num = MAX_CONCURRENT_QUERY - state->runningQuery;
 
 	if (available_num <= 0)
 		return;
+
+	if (requester == NULL)
+	{
+		connect_zmq();
+	}
 
 	hash_seq_init(&status, queryTable);
 
@@ -314,19 +192,25 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state)
 		return;
 
   /* if currently have more than 1 queries to select from, query the server */
-	if (list_length(listing) > 1)
+	if (list_length(listing) >= 1)
 	{
+		query = cJSON_CreateObject();
+		plans= cJSON_CreateArray();
 		elog(LOG, "Querying server for decision.");
-		sendMsg(decision_server_socket, state->tableAccessCounter, sizeof(env_features));
 		foreach (curr, listing)
 		{
 			query_entry = (QueryTableEntry *) lfirst(curr);
-			sendRequest(query_entry);
+			parsed_plan = cJSON_Parse(query_entry->query_plan_json);
+			cJSON_AddItemToArray(plans, parsed_plan);
 		}
 
-		/*End Sign of query embedding packets*/
-		memset(endTensor, -1, QUERY_EMBEDDING_SIZE * sizeof(double));
-		sendMsg(decision_server_socket, endTensor, sizeof(query_embed));
+		cJSON_AddItemToObject(query, "plans", plans);
+		cJSON_AddItemToObject(query, "env", env_to_json(env_features));
+
+		str = cJSON_Print(query);
+		zmq_send(requester, str, strlen(str), 0);
+
+		cJSON_Delete(query);
 
 		elog(LOG,
 			 "%d queries sent for decision, %d queries is giving up.",
@@ -334,15 +218,19 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state)
 			 giving_up);
 
 		decision = recvDecision();
-		elog(LOG, "Received decision: %d", decision);
+		elog(LOG, "Received decision: %d", decision.decision);
 	}else{
+		decision.decision = 0;
 		elog(LOG, "Only one query is available, start it directly.");
 	}
 
 	/* Start the picked query */
-	query_entry = (QueryTableEntry *) list_nth(listing, decision);
+	query_entry = (QueryTableEntry *) list_nth(listing, decision.decision);
 	query_entry->status = QUERY_AVAILABLE;
 	query_entry->start_time = clock();
+	query_entry->wakeup_by = decision.decision_id;
+
+	list_free(listing);
 
 	state->runningQuery++;
 	elog(LOG, "Starting pid:%d, currently have %d runningQuery", query_entry->key.pid, state->runningQuery);
@@ -358,7 +246,7 @@ typedef struct TableRef
  * and then prioritize executing those queries that have accessed
  * the most frequently used tables with the highest popularity.*/
 void
-RescheduleUseHotTableFirst(HTAB *queryTable, ScheduleState *state)
+RescheduleUseHotTableFirst(HTAB *queryTable, ScheduleState *state, env_features *env)
 {
 	HASH_SEQ_STATUS status;
 	QueryTableEntry *query_entry;
@@ -431,6 +319,7 @@ RescheduleUseHotTableFirst(HTAB *queryTable, ScheduleState *state)
 		{
 			query_entry->status = QUERY_AVAILABLE;
 			state->runningQuery++;
+			query_entry->wakeup_by = -1;
 			elog(LOG, "Starting pid:%d, currently have %d runningQuery", query_entry->key.pid, state->runningQuery);
 			avaliable = MAX_CONCURRENT_QUERY - state->runningQuery;
 		}
@@ -449,7 +338,7 @@ RescheduleUseHotTableFirst(HTAB *queryTable, ScheduleState *state)
 }
 
 void
-RescheduleRandomly(HTAB *queryTable, ScheduleState *state)
+RescheduleRandomly(HTAB *queryTable, ScheduleState *state, env_features *env_features)
 {
 	HASH_SEQ_STATUS status;
 	QueryTableEntry *query_entry;
@@ -466,6 +355,7 @@ RescheduleRandomly(HTAB *queryTable, ScheduleState *state)
 		if (query_entry->status == QUERY_BLOCKED)
 		{
 			query_entry->status = QUERY_AVAILABLE;
+			query_entry->wakeup_by = -1;
 			state->runningQuery++;
 			avaliable = MAX_CONCURRENT_QUERY - state->runningQuery;
 		}
@@ -484,7 +374,7 @@ RescheduleRandomly(HTAB *queryTable, ScheduleState *state)
 
 /* This function will prioritize start queries that involve the fewest tables. */
 void
-RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state)
+RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state, env_features *env_features)
 {
 	HASH_SEQ_STATUS status;
 	QueryTableEntry *query_entry;
@@ -523,6 +413,7 @@ RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state)
 			query_entry->status = QUERY_AVAILABLE;
 			state->runningQuery++;
 			elog(LOG, "Starting pid:%d, currently have %d runningQuery", query_entry->key.pid, state->runningQuery);
+			query_entry->wakeup_by = -1;
 		}
 		else if (query_entry->status == QUERY_GIVE_UP)
 		{

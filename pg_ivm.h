@@ -25,6 +25,8 @@
 #include "nodes/plannodes.h"
 #include "utils/hsearch.h"
 #include "executor/execdesc.h"
+#include "cJSON.h"
+#include <zmq.h>
 
 #define Natts_pg_ivm_immv 3
 
@@ -81,8 +83,8 @@ extern void inline_cte(PlannerInfo *root, CommonTableExpr *cte);
 /*ivm related log level*/
 #define IVM_LOG_LEVEL LOG
 
-enum query_staus{
-
+enum query_staus
+{
 	/* After a new received query logging into the global structure, it will become blocked*/
 	QUERY_BLOCKED,
 
@@ -96,6 +98,19 @@ enum query_staus{
 	QUERY_GIVE_UP
 };
 
+typedef int ScheduleTag;
+
+enum schedule_tag
+{
+	QUERY_FINISHED,
+
+	QUERY_GIVEUP,
+
+	INCOMING_QUERY,
+
+	DEAD_WAKEUP,
+};
+
 /* Configurable parameters */
 #define MAX_QUERY_NUM 1000
 #define MAX_QUERY_LENGTH ((Size) 8192)
@@ -104,6 +119,8 @@ enum query_staus{
 #define MAX_CONCURRENT_QUERY 4
 
 #define QUERY_EMBEDDING_SIZE 1024
+
+#define QUERY_PLAN_JSON_SIZE 4096
 
 //8 base tables, 8 immvs, 1 for all other tables
 #define WORKING_TABLES 17
@@ -128,10 +145,13 @@ typedef struct QueryTableEntry
 {
 	QueryTableKey key;
 	Oid affected_tables[MAX_AFFECTED_TABLE];
-	double embedding[QUERY_EMBEDDING_SIZE];
+	char query_plan_json[QUERY_PLAN_JSON_SIZE];
 	int status;
 	TransactionId xid;
 	clock_t start_time;
+
+	/* decision id if waken up by the server, -1 otherwise */
+	int wakeup_by;
 } QueryTableEntry;
 
 /* Saving all necessary information we need for query scheduling*/
@@ -148,18 +168,78 @@ typedef struct SchedueState
 	int tableAccessCounter[WORKING_TABLES];
 } ScheduleState;
 
+#pragma pack(1)
+
+typedef struct payload_t
+{
+	double embedding[1024];
+} query_embed;
+
+typedef struct response_t
+{
+	uint32_t decision_id;
+	uint32_t decision;
+} response;
+
+typedef struct env_features_t
+{
+	int schedule_tag;
+	int wakeup_decision_id;
+	int LRU[WORKING_TABLES];
+} env_features;
+
+// A struct to represent a query plan before we transform it into JSON.
+typedef struct BaoPlanNode {
+  // An integer representation of the PG NodeTag.
+  unsigned int node_type;
+
+  // The optimizer cost for this node (total cost).
+  double optimizer_cost;
+
+  // The cardinality estimate (plan rows) for this node.
+  double cardinality_estimate;
+
+  // If this is a scan or index lookup, the name of the underlying relation.
+  char* relation_name;
+
+  // Left child.
+  struct BaoPlanNode* left;
+
+  // Right child.
+  struct BaoPlanNode* right;
+} BaoPlanNode;
+
+#pragma pack()
+
 #define SEGMENT_SIZE (sizeof(ScheduleState))
 
 /* querysched.c */
 
-extern QueryTableEntry *LogQuery(HTAB *queryTable, ScheduleState *state, PlannedStmt *plannedstmt,
-								 const char *query_string);
-extern void Reschedule(HTAB *queryTable, ScheduleState *state);
-extern void RemoveLoggedQuery(QueryDesc *queryDesc, HTAB *queryHashTable,
-							  ScheduleState *schedule_state);
+extern void LogQuery(ScheduleState *state, QueryDesc *desc, QueryTableEntry *query_entry);
+extern void Reschedule(HTAB *queryTable, ScheduleState *state, ScheduleTag tag, env_features *env);
+
+extern void
+UpdateStateForRemoving(ScheduleState *state, QueryDesc *desc, QueryTableEntry *query_entry, bool is_running);
 
 /* env_embedding.c */
 
 extern void log_table_access(ScheduleState * ss, Oid *affected_table);
+
+
+/* utils.c */
+
+
+typedef int HashQueryType;
+
+extern QueryTableEntry *GetEntry(HTAB *table, QueryDesc *queryDesc, HASHACTION type, bool* found);
+extern int connect_to_server(const char* host, int port);
+extern int send_msg(int sock, const char *msg, uint32_t msgsize);
+extern void write_json_to_socket(int conn_fd, const char* json);
+
+
+extern char* plan_to_json(PlannedStmt* plan);
+extern cJSON* env_to_json(env_features* env);
+
+extern cJSON* buffer_state();
 
 #endif

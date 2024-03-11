@@ -1,50 +1,39 @@
 import numpy as np
 from typing import List, Tuple
-import socket
 from ctypes import *
 import time
+from sequence_generator import SequenceGenerator
+from typing import NamedTuple
+from enum import Enum
+import zmq
+import json
 
 
-class MyStruct(Structure):
-    _pack_ = 1
+class ScheduleTag(Enum):
+    QUERY_FINISHED = 0
+    QUERY_GIVEUP = 1
+    INCOMING_QUERY = 2
+    DEAD_WAKEUP = 3
 
-
-class RequestEmbed(MyStruct):
-    _fields_ = [("embedding", c_double * 1024)]
-
-
-class ScheduleDecision(MyStruct):
-    _fields_ = [("decision", c_uint32)]
-
-
-class EnvFeatures(MyStruct):
-    _fields_ = [("lru", c_int * 17)]
-
-
-@classmethod
-def recv_and_unpack(cls, socket: socket.socket):
-    buff = socket.recv(sizeof(cls))
-    while len(buff) < sizeof(cls):
-        buff += socket.recv(sizeof(cls) - len(buff))
-    return cls.from_buffer_copy(buff)
-
-
-MyStruct.recv_and_unpack = recv_and_unpack
+class EvaluationResult(NamedTuple):
+    reward: float
+    schedule_tag: ScheduleTag
+    wakeup_by: int
 
 
 class Reqs:
     def __init__(
         self,
-        requests_embedding: np.ndarray,
+        plans: list,
         environment_embedding: np.ndarray,
-        socket: socket.socket,
+        send_hook
     ) -> None:
-        self.requests_embedding = requests_embedding
         self.environment_embedding = environment_embedding
-        self.socket = socket
+        self.plans = plans
+        self.send_hook = send_hook
 
     def get_random_action(self) -> np.uint32:
-        return np.random.randint(0, self.requests_embedding.shape[0], dtype=np.uint32)
+        return np.random.randint(0, len(self.plans), dtype=np.uint32)
 
     def get_env_features(self) -> np.ndarray:
         return self.environment_embedding
@@ -55,56 +44,51 @@ class Reqs:
         """
         return self.requests_embedding
 
-    def make_decision(self, actions: np.uint32) -> None:
-        response = ScheduleDecision()
-        response.decision = actions
-        if actions > (self.environment_embedding.shape[0] - 1):
-            print("ERROR", actions, self.environment_embedding.shape)
+    def make_decision(self, actions: np.uint32) -> int:
+        response = {}
+        response["decision"] = int(actions)
+        response["decision_id"] = SequenceGenerator.get()
+        if actions > (len(self.plans) - 1):
+            print("ERROR", actions, len(self.plans))
 
-        self.socket.send(response)
+        self.send_hook(json.dumps(response))
+
+        return response["decision_id"]
+
 
 
 class Engine:
     def __init__(self) -> None:
-        self.ssock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.context = zmq.Context()
+        self.sock = self.context.socket(zmq.REP)
+        self.sock.bind("tcp://*:5555")
         self.fired = False
         self.drop_next_reward = False
         self.running_mean = 0.0
         print("Socket created")
 
-    def bind(self, host, port):
-        self.ssock.bind((host, port))
-        self.ssock.listen(3)
-        print("Server listening on port {:d}".format(port))
-
-        self.csock, self.client_address = self.ssock.accept()
-        print("Accepted connection from {:s}".format(self.client_address[0]))
-
-    def fetch_req(self) -> Reqs:
+    def fetch_req(self) -> Tuple[EvaluationResult, Reqs]:
         tensor_lists = []
 
-        env_features = np.array(
-            EnvFeatures.recv_and_unpack(self.csock).lru, dtype=np.float32
+        request = json.loads(self.sock.recv())
+
+        print(request)
+
+        #env_features = EnvFeatures.recv_and_unpack(self.csock)
+        env_features = request["env"]
+
+        env_embedding = np.array(
+            env_features["LRU"], dtype=np.float32
         )
 
-        #print(f"Received LRU: {np.array(env_features.lru)}")
-
-        while payload_in := RequestEmbed.recv_and_unpack(self.csock):
-            embedding = np.array(payload_in.embedding)
-            if np.isnan(embedding).all():
-                break
-
-            # Set invalid embedding to 0
-            embedding[np.isnan(embedding)] = 0.0
-
-            tensor_lists.append(embedding)
+        plans = request["plans"]
 
         #print("Received {:d} tensors".format(len(tensor_lists)))
 
         if not self.fired:
             self.fired = True
             self.prev_time = time.time()
-            return Reqs(np.array(tensor_lists), env_features, self.csock)
+            return Reqs(plans, env_embedding, lambda x: self.sock.send_string(x))
 
         reward = -(time.time() - self.prev_time) * len(tensor_lists)
         self.running_mean = (
@@ -113,23 +97,7 @@ class Engine:
             else 0.75 * self.running_mean + 0.25 * reward
         )
         self.prev_time = time.time()
-        return reward, Reqs(np.array(tensor_lists), env_features, self.csock)
-
-    def close(self):
-        self.ssock.close()
-        self.csock.close()
-
-    def flush(self):
-        self.csock.setblocking(False)
-        try:
-            while True:
-                data = self.csock.recv(1024)
-                if not data:
-                    break
-        except socket.error as e:
-            pass
-        finally:
-            self.csock.setblocking(True)
+        return EvaluationResult(reward, ScheduleTag(env_features["schedule_tag"]), env_features["wakeup_decision_id"]), Reqs(plans, env_embedding, lambda x: self.sock.send_string(x))
 
 
 class ParallelEngines:
@@ -146,13 +114,12 @@ class ParallelEngines:
 if __name__ == "__main__":
     try:
         engine = Engine()
-        engine.bind("localhost", 2300)
+        #engine.bind("localhost", 2300)
         reqs = engine.fetch_req()
         while True:
             reqs.make_decision(reqs.get_random_action())
-            reward, reqs = engine.fetch_req()
-            print(reward)
+            evaluation_result, reqs = engine.fetch_req()
+            print(evaluation_result)
     except:
         print("Error")
-        engine.ssock.close()
         raise

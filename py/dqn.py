@@ -82,181 +82,6 @@ ACTION_FEATURE_SIZE = 1024
 ENV_FEATURE_SIZE = 17
 MAX_ACTION_NUM = 100
 
-
-class RequestsServer:
-    def __init__(self):
-        self.control_queue = mp.Queue()
-        self.result = mp.Value("d", 0.0)
-        self.bootstrap_process = mp.Process(target=run_batch, args=(self.result, self.control_queue, False))
-
-    def start(self):
-        self.bootstrap_process.start()
-
-    def kill(self):
-        if not self.bootstrap_process.is_alive():
-            return
-
-        self.control_queue.put("shutdown")
-
-        with alive_bar(
-            title="Waiting unfinished backend processes to exit",
-            spinner="classic",
-            bar=None,
-            monitor=False,
-            elapsed=True,
-            stats=False,
-        ):
-            self.bootstrap_process.join()
-            #while not os.system('ps -ef | grep "[p]ostgres: vscode" > /dev/null'):
-            #    time.sleep(0.5)
-
-        self.control_queue = mp.Queue()
-        self.bootstrap_process = mp.Process(target=run_batch, args=(self.result, self.control_queue, False))
-
-
-class DecisionServer:
-    def __init__(self, engine, model, epsilon):
-        self.process = mp.Process(target=self.decision_func, args=(engine, model))
-        self.epsilon = epsilon
-
-    def start(self):
-        self.process.start()
-
-    def stop(self):
-        self.process.kill()
-
-    def decision_func(self, engine, model):
-
-        # Important! Set the number of threads to 1 to avoid potential performance issues
-        torch.set_num_threads(1)
-
-        while True:
-            _, reqs = engine.fetch_req()
-            if random.random() < epsilon:
-                actions = reqs.get_random_action()
-            else:
-                env_obs = (
-                    torch.from_numpy(reqs.get_env_features())
-                    .to(torch.float32)
-                    .unsqueeze(dim=0)  # Add env dimension
-                )
-                action_obs = (
-                    torch.from_numpy(reqs.get_action_features())
-                    .to(torch.float32)
-                    .unsqueeze(dim=0)  # Add env dimension
-                )
-                with torch.no_grad():
-                    q_values = model(
-                        env_obs.unsqueeze(dim=0),  # Add batch dimension
-                        action_obs.unsqueeze(dim=0),  # Add batch dimension
-                    )
-                actions = torch.argmax(q_values.squeeze(dim=0), dim=1).cpu().numpy()
-            reqs.make_decision(actions.flatten()[0])
-
-
-class DBReplayBufferSamples(NamedTuple):
-    env_observations: torch.Tensor
-    action_space_observations: torch.Tensor
-    next_env_observations: torch.Tensor
-    next_action_space_observations: torch.Tensor
-    actions: torch.Tensor
-    rewards: torch.Tensor
-    dones: torch.Tensor
-
-
-class DBReplayBuffer:
-    def __init__(
-        self,
-        buffer_size: int,
-        observation_dim: int,
-        action_dim: int,
-        n_envs: int,
-        max_action_num: int,
-        device: torch.device,
-    ):
-        self.buffer_size = buffer_size
-        self.observation_dim = observation_dim
-        self.action_dim = action_dim
-        self.max_action_num = max_action_num
-        self.device = device
-
-        self.pos = 0
-        self.full = False
-        self.device = device
-        self.n_envs = n_envs
-
-        self.env_observations = np.zeros(
-            (buffer_size, n_envs, observation_dim), dtype=np.float32
-        )
-        self.action_space_observations = np.zeros(
-            (buffer_size, n_envs, max_action_num, action_dim), dtype=np.float32
-        )
-        self.next_env_observations = np.zeros(
-            (buffer_size, n_envs, observation_dim), dtype=np.float32
-        )
-        self.next_action_space_observations = np.zeros(
-            (buffer_size, n_envs, max_action_num, action_dim), dtype=np.float32
-        )
-        self.actions = np.zeros((buffer_size, n_envs), dtype=np.int64)
-        self.rewards = np.zeros((buffer_size, n_envs), dtype=np.float32)
-        self.dones = np.zeros((buffer_size, n_envs), dtype=np.float32)
-        self.valid_action_num = np.zeros((buffer_size, n_envs), dtype=np.uint32)
-        self.next_valid_action_num = np.zeros((buffer_size, n_envs), dtype=np.uint32)
-
-    def add(
-        self,
-        env_observations: np.ndarray,
-        action_space_observations: np.ndarray,
-        next_env_observations: np.ndarray,
-        next_action_space_observations: np.ndarray,
-        actions: np.ndarray,
-        rewards: np.ndarray,
-        dones: np.ndarray,
-    ):
-        assert env_observations.shape == (self.n_envs, self.observation_dim)
-        assert next_env_observations.shape == (self.n_envs, self.observation_dim)
-        assert rewards.shape == (self.n_envs,)
-        assert dones.shape == (self.n_envs,)
-
-        self.env_observations[self.pos] = env_observations
-        self.next_env_observations[self.pos] = next_env_observations
-        self.action_space_observations[
-            self.pos, :, : action_space_observations.shape[1], :
-        ] = action_space_observations
-        self.next_action_space_observations[
-            self.pos, :, : next_action_space_observations.shape[1], :
-        ] = next_action_space_observations
-        self.valid_action_num[self.pos] = action_space_observations.shape[1]
-        self.next_valid_action_num[self.pos] = next_action_space_observations.shape[1]
-
-        self.actions[self.pos] = actions
-        self.rewards[self.pos] = rewards
-        self.dones[self.pos] = dones
-
-        self.pos += 1
-        if self.pos == self.buffer_size:
-            self.full = True
-            self.pos = 0
-
-    def sample(self, batch_size: int):
-        idxs = np.random.randint(0, self.buffer_size, size=batch_size)
-
-        return DBReplayBufferSamples(
-            torch.from_numpy(self.env_observations[idxs]).to(self.device),
-            torch.from_numpy(self.action_space_observations[idxs, :, :, :]).to(
-                self.device
-            ),
-            torch.from_numpy(self.next_env_observations[idxs]).to(self.device),
-            torch.from_numpy(self.next_action_space_observations[idxs, :, :, :]).to(
-                self.device
-            ),
-            torch.from_numpy(self.actions[idxs]).to(self.device),
-            torch.from_numpy(self.rewards[idxs]).to(self.device),
-            torch.from_numpy(self.dones[idxs]).to(self.device),
-        )
-
-
-# ALGO LOGIC: initialize agent here:
 class QNetwork(nn.Module):
     def __init__(self):
         super().__init__()
@@ -311,6 +136,207 @@ class QNetwork(nn.Module):
         )
 
         return q_values
+
+
+class RequestsServer:
+    def __init__(self):
+        self.control_queue = mp.Queue()
+        self.result = mp.Value("d", 0.0)
+        self.bootstrap_process = mp.Process(target=run_batch, args=(self.result, self.control_queue, False))
+
+    def start(self):
+        self.bootstrap_process.start()
+
+    def kill(self):
+        if not self.bootstrap_process.is_alive():
+            return
+
+        self.control_queue.put("shutdown")
+
+        with alive_bar(
+            title="Waiting unfinished backend processes to exit",
+            spinner="classic",
+            bar=None,
+            monitor=False,
+            elapsed=True,
+            stats=False,
+        ):
+            self.bootstrap_process.join()
+            #while not os.system('ps -ef | grep "[p]ostgres: vscode" > /dev/null'):
+            #    time.sleep(0.5)
+
+        self.control_queue = mp.Queue()
+        self.bootstrap_process = mp.Process(target=run_batch, args=(self.result, self.control_queue, False))
+
+
+class DecisionServer:
+    def __init__(self, engine: Engine, model, epsilon):
+        self.process = mp.Process(target=self.decision_func, args=(engine, model))
+        self.epsilon = epsilon
+        self.rewards = dict()
+        self.give_up_count = 0
+        self.dicison_count = 0
+
+    def start(self):
+        self.process.start()
+
+    def stop(self):
+        self.process.kill()
+
+    def decision_func(self, engine:Engine, model:QNetwork):
+
+        # Important! Set the number of threads to 1 to avoid potential performance issues
+        torch.set_num_threads(1)
+
+        while True:
+            result, reqs = engine.fetch_req()
+            self.rewards[result.wakeup_by] = result.reward
+
+            if random.random() < epsilon:
+                actions = reqs.get_random_action()
+            else:
+                env_obs = (
+                    torch.from_numpy(reqs.get_env_features())
+                    .to(torch.float32)
+                    .unsqueeze(dim=0)  # Add env dimension
+                )
+                action_obs = (
+                    torch.from_numpy(reqs.get_action_features())
+                    .to(torch.float32)
+                    .unsqueeze(dim=0)  # Add env dimension
+                )
+                with torch.no_grad():
+                    q_values = model(
+                        env_obs.unsqueeze(dim=0),  # Add batch dimension
+                        action_obs.unsqueeze(dim=0),  # Add batch dimension
+                    )
+                actions = torch.argmax(q_values.squeeze(dim=0), dim=1).cpu().numpy()
+            reqs.make_decision(actions.flatten()[0])
+            self.decision_count += 1
+
+    def clean_reward_sum(self):
+        self.reward_sum = 0
+
+
+class DBReplayBufferSamples(NamedTuple):
+    env_observations: torch.Tensor
+    action_space_observations: torch.Tensor
+    next_env_observations: torch.Tensor
+    next_action_space_observations: torch.Tensor
+    actions: torch.Tensor
+    rewards: torch.Tensor
+    dones: torch.Tensor
+
+
+class DBReplayBuffer:
+    def __init__(
+        self,
+        buffer_size: int,
+        observation_dim: int,
+        action_dim: int,
+        n_envs: int,
+        max_action_num: int,
+        device: torch.device,
+    ):
+        self.buffer_size = buffer_size
+        self.observation_dim = observation_dim
+        self.action_dim = action_dim
+        self.max_action_num = max_action_num
+        self.device = device
+
+        self.pos = 0
+        self.full = False
+        self.device = device
+        self.n_envs = n_envs
+
+        self.env_observations = np.zeros(
+            (buffer_size, n_envs, observation_dim), dtype=np.float32
+        )
+        self.action_space_observations = np.zeros(
+            (buffer_size, n_envs, max_action_num, action_dim), dtype=np.float32
+        )
+        self.next_env_observations = np.zeros(
+            (buffer_size, n_envs, observation_dim), dtype=np.float32
+        )
+        self.next_action_space_observations = np.zeros(
+            (buffer_size, n_envs, max_action_num, action_dim), dtype=np.float32
+        )
+        self.actions = np.zeros((buffer_size, n_envs), dtype=np.int64)
+        self.rewards = np.zeros((buffer_size, n_envs), dtype=np.float32)
+        self.dones = np.zeros((buffer_size, n_envs), dtype=np.float32)
+        self.valid_action_num = np.zeros((buffer_size, n_envs), dtype=np.uint32)
+        self.next_valid_action_num = np.zeros((buffer_size, n_envs), dtype=np.uint32)
+
+        self.id_to_pos = dict()
+        self.pos_to_id = dict()
+
+    def add(
+        self,
+        env_observations: np.ndarray,
+        action_space_observations: np.ndarray,
+        next_env_observations: np.ndarray,
+        next_action_space_observations: np.ndarray,
+        actions: np.ndarray,
+        rewards: np.ndarray,
+        dones: np.ndarray,
+        idx: int
+    ):
+        assert env_observations.shape == (self.n_envs, self.observation_dim)
+        assert next_env_observations.shape == (self.n_envs, self.observation_dim)
+        assert rewards.shape == (self.n_envs,)
+        assert dones.shape == (self.n_envs,)
+
+        self.env_observations[self.pos] = env_observations
+        self.next_env_observations[self.pos] = next_env_observations
+        self.action_space_observations[
+            self.pos, :, : action_space_observations.shape[1], :
+        ] = action_space_observations
+        self.next_action_space_observations[
+            self.pos, :, : next_action_space_observations.shape[1], :
+        ] = next_action_space_observations
+        self.valid_action_num[self.pos] = action_space_observations.shape[1]
+        self.next_valid_action_num[self.pos] = next_action_space_observations.shape[1]
+
+        self.actions[self.pos] = actions
+        self.rewards[self.pos] = rewards
+        self.dones[self.pos] = dones
+
+        if self.pos in self.pos_to_id:
+            del self.id_to_pos[self.pos_to_id[self.pos]]
+            del self.pos_to_id[self.pos]
+
+        self.id_to_pos[idx] = self.pos
+        self.pos_to_id[self.pos] = idx
+
+        self.pos += 1
+        if self.pos == self.buffer_size:
+            self.full = True
+            self.pos = 0
+
+    def sample(self, batch_size: int):
+        idxs = np.random.randint(0, self.buffer_size, size=batch_size)
+
+        return DBReplayBufferSamples(
+            torch.from_numpy(self.env_observations[idxs]).to(self.device),
+            torch.from_numpy(self.action_space_observations[idxs, :, :, :]).to(
+                self.device
+            ),
+            torch.from_numpy(self.next_env_observations[idxs]).to(self.device),
+            torch.from_numpy(self.next_action_space_observations[idxs, :, :, :]).to(
+                self.device
+            ),
+            torch.from_numpy(self.actions[idxs]).to(self.device),
+            torch.from_numpy(self.rewards[idxs]).to(self.device),
+            torch.from_numpy(self.dones[idxs]).to(self.device),
+        )
+
+    def update_reward(self, idx, reward):
+        pos = self.id_to_pos[idx]
+        self.rewards[pos] = reward
+
+
+
+# ALGO LOGIC: initialize agent here:
 
 
 def fix_seed(seed):

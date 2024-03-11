@@ -131,20 +131,14 @@ def run_batch(result, control_queue, stop=True):
 
 
 if __name__ == "__main__":
-    control_queue = Queue()
-    result = Value("d", 0.0)
+    from dqn import RequestsServer
+    requests_server = RequestsServer()
+    requests_server.start()
 
-    batch_threading = threading.Thread(target=run_batch, args=(result, control_queue))
+    time.sleep(30)
 
-    batch_threading.start()
+    requests_server.kill()
 
-    time.sleep(15)
-
-    control_queue.put("shutdown")
-
-    batch_threading.join()
-
-    print(result.value)
 
 if __name__ == "lll__main__":
     reptead_times = 4
