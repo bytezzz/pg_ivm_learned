@@ -1,38 +1,20 @@
 import time
-from multiprocessing import Process, Barrier, Array, Value, Pipe, Queue
+import multiprocessing as mp
 from transactions import *
-import itertools
-import numpy as np
-import pandas as pd
+from typing import List, Callable
 import threading
+from alive_progress import alive_bar
+import zmq
 import os
-import debugpy
 
 workload = [shipment, good_receive, update_score, adjust_discount]
-max_connection = 8
-ratio = [0.25, 0.25, 0.25, 0.25]
 
 
-workloads = list(
-    itertools.chain(
-        *[
-            [workload[i]] * int(max_connection * percentage)
-            for i, percentage in enumerate(ratio)
-        ]
-    )
-)
-
-
-def save_result(result, filename):
-    result.loc["mean"] = result.mean()
-    result.to_csv(filename)
-
-
-def master(conn: psycopg.Connection, queue: Queue):
+def master(conn: psycopg.Connection, queue: mp.Queue):
     while True:
         signal = queue.get()
         if signal == "shutdown":
-            #print("Trying to close the connection")
+            # print("Trying to close the connection")
             try:
                 conn.cancel()
             except Exception as e:
@@ -41,19 +23,22 @@ def master(conn: psycopg.Connection, queue: Queue):
                 conn.close()
                 break
 
-def slave(conn, id, time_costs):
+
+def slave(
+    conn: psycopg.Connection, workloads: List[Callable], id: int, time_costs: mp.Array
+):
     time_before = time.time()
 
     try:
-        #print(f"Process {id} is working")
-        workloads[id](conn)
+        for i, workload in enumerate(workloads):
+            workload(conn)
     except psycopg.errors.DeadlockDetected:
         print(f"Process {id} has been detected deadlock")
         conn.rollback()
         time_costs[id] = -1
         return
     except Exception as e:
-        #print(f"Process {id} has been detected exception: {e}")
+        # print(f"Process {id} has been detected exception: {e}")
         if "connection pointer is NULL" in str(e):
             print(f"Worker {id} finished!")
         time_costs[id] = -1
@@ -63,10 +48,12 @@ def slave(conn, id, time_costs):
     time_costs[id] = time_after - time_before
 
 
-def worker(id, time_costs, queue):
+def worker(workloads: List[Callable], time_costs: mp.Array, queue: mp.Queue, id: int):
     conn = get_connection()
     master_thread = threading.Thread(target=master, args=(conn, queue))
-    slave_thread = threading.Thread(target=slave, args=(conn, id, time_costs))
+    slave_thread = threading.Thread(
+        target=slave, args=(conn, workloads, id, time_costs)
+    )
 
     try:
         master_thread.start()
@@ -75,96 +62,98 @@ def worker(id, time_costs, queue):
         if master_thread.is_alive():
             queue.put("shutdown")
         master_thread.join()
-        #print(f"Worker {id} has finished")
     except Exception as e:
         print(f"Worker {id} has been detected exception: {e}")
 
 
-
-def broadcast_func(from_queue, to_queue, stop_event:threading.Event):
+def broadcaster(from_queue: mp.Queue, to_queues: List[mp.Queue]):
     while True:
         signal = from_queue.get()
-        print(f"Broadcasting signal {signal}")
-        stop_event.set()
-        for queue in to_queue:
+        for queue in to_queues:
             queue.put(signal)
         break
 
-def run_batch(result, control_queue, stop=True):
-    print("Starting the batch")
-    time_costs = Array("d", [0.0] * max_connection)
 
-    stop_event = threading.Event()
+def run_batch(
+    workloads_map: List[List[Callable]], time_costs: mp.Array, control_queue: mp.Queue
+):
+    assert len(time_costs) == len(workloads_map)
 
-    queues = [Queue() for _ in range(max_connection)]
+    queues = [mp.Queue() for _ in range(len(workloads_map))]
     broadcast_threading = threading.Thread(
-        target=broadcast_func, args=(control_queue, [queue for queue in queues], stop_event)
+        target=broadcaster, args=(control_queue, [queue for queue in queues])
     )
-
     broadcast_threading.start()
 
-    while True:
-        #print("Restartiing ")
+    processes = [
+        mp.Process(target=worker, args=(workloads_map[i], time_costs, queues[i], i))
+        for i in range(len(workloads_map))
+    ]
 
-        processes = [
-            Process(target=worker, args=(i, time_costs, queues[i]))
-            for i in range(max_connection)
-        ]
+    try:
+        for p in processes:
+            p.start()
 
-        try:
-            for p in processes:
-                p.start()
+        for p in processes:
+            p.join()
 
-            for p in processes:
-                p.join()
+    except Exception as e:
+        for p in processes:
+            p.kill()
 
-            result.value = np.mean(time_costs)
+    if broadcast_threading.is_alive():
+        control_queue.put("shutdown")
 
-        except Exception as e:
-            for p in processes:
-                p.kill()
+    broadcast_threading.join()
 
-        if stop or stop_event.is_set():
-            control_queue.put("shutdown")
-            print("Shutting down the batch")
-            break
+
+class BatchRunner:
+    def __init__(self, workload_map: List[List[Callable]]):
+        self.control_queue = mp.Queue()
+        self.time_costs = mp.Array("d", len(workload_map))
+        self.bootstrap_process = mp.Process(
+            target=run_batch, args=(workload_map, self.time_costs, self.control_queue)
+        )
+
+    def start(self) -> None:
+        self.bootstrap_process.start()
+
+    def get_result(self) -> List[int]:
+        self.bootstrap_process.join()
+        return list(self.time_costs)
+
+    def kill(self) -> None:
+        if not self.bootstrap_process.is_alive():
+            return
+
+        self.control_queue.put("shutdown")
+
+        with alive_bar(
+            title="Waiting unfinished backend processes to exit",
+            spinner="classic",
+            bar=None,
+            monitor=False,
+            elapsed=True,
+            stats=False,
+        ):
+            self.bootstrap_process.join()
+            while not os.system('ps -ef | grep "[p]ostgres: vscode" > /dev/null'):
+                time.sleep(0.5)
 
 
 if __name__ == "__main__":
-    from dqn import RequestsServer
-    requests_server = RequestsServer()
-    requests_server.start()
+    wl = [[shipment], [good_receive], [update_score], [adjust_discount]]
+    runner = BatchRunner(wl * 2)
+    runner.start()
+    print(runner.get_result())
 
-    time.sleep(30)
+    contxt = zmq.Context()
+    socket = contxt.socket(zmq.REQ)
+    socket.connect("tcp://localhost:5555")
 
-    requests_server.kill()
+    socket.send_string("{'type': 'done'}")
 
-
-if __name__ == "lll__main__":
-    reptead_times = 4
-
-    filename = time.strftime("%Y_%m_%d_%H_%M.log")
-    workload_name = [f"{workload.__name__}#{i}" for i, workload in enumerate(workloads)]
-    result = pd.DataFrame(columns=workload_name + ["average_time_cost"])
-
-    try:
-        for i in range(reptead_times):
-            print(f"Testing the {i+1}th time")
-
-            time_costs = Array("d", [0.0] * max_connection)
-            processes = [
-                Process(target=worker, args=(i, time_costs))
-                for i in range(max_connection)
-            ]
-
-            for p in processes:
-                p.start()
-
-            for p in processes:
-                p.join()
-
-            result.loc[len(result)] = [*time_costs, np.mean(time_costs)]
-    except Exception as e:
-        print(e)
-    finally:
-        save_result(result, filename)
+    if socket.recv_string() != "ack":
+        raise ValueError("Failed to send done signal")
+    else:
+        print("Done signal has been sent")

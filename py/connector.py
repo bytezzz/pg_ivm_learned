@@ -81,14 +81,14 @@ class Engine:
             env_features["LRU"], dtype=np.float32
         )
 
-        plans = request["plans"]
+        candidate_plans = request["candidate_plans"]
 
         #print("Received {:d} tensors".format(len(tensor_lists)))
 
         if not self.fired:
             self.fired = True
             self.prev_time = time.time()
-            return Reqs(plans, env_embedding, lambda x: self.sock.send_string(x))
+            return Reqs(candidate_plans, env_embedding, lambda x: self.sock.send_string(x))
 
         reward = -(time.time() - self.prev_time) * len(tensor_lists)
         self.running_mean = (
@@ -97,7 +97,7 @@ class Engine:
             else 0.75 * self.running_mean + 0.25 * reward
         )
         self.prev_time = time.time()
-        return EvaluationResult(reward, ScheduleTag(env_features["schedule_tag"]), env_features["wakeup_decision_id"]), Reqs(plans, env_embedding, lambda x: self.sock.send_string(x))
+        return EvaluationResult(reward, ScheduleTag(env_features["schedule_tag"]), env_features["wakeup_decision_id"]), Reqs(candidate_plans, env_embedding, lambda x: self.sock.send_string(x))
 
 
 class ParallelEngines:

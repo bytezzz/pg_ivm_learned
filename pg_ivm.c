@@ -75,6 +75,7 @@ static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
 static ScheduleState *schedule_state = NULL;
 static HTAB *queryHashTable = NULL;
+static HTAB *lockedRelations = NULL;
 
 
 /* This help to determine if current running query is a top-level query or not
@@ -606,6 +607,9 @@ pg_hook_shmem_startup(void)
 	queryHashTable =
 		ShmemInitHash("QueryTable", MAX_QUERY_NUM, MAX_QUERY_NUM, &info, HASH_ELEM | HASH_BLOBS);
 
+	lockedRelations = ShmemInitHash("LockedRelations", MAX_QUERY_NUM, MAX_QUERY_NUM, &info,
+									HASH_ELEM | HASH_BLOBS);
+
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 
 	schedule_state = ShmemInitStruct("pg_hook", SEGMENT_SIZE, &found);
@@ -804,6 +808,7 @@ waiting:
 
 	/* Update table access counter, as an environment feature*/
 	log_table_access(schedule_state, query_entry->affected_tables);
+	query_entry->start_time = clock();
 	LWLockRelease(schedule_state->lock);
 	RESUME_INTERRUPTS();
 }
@@ -848,6 +853,8 @@ void finishRunningQuery(QueryDesc *queryDesc)
 {
 	env_features env;
 	QueryTableEntry *query;
+	HASH_SEQ_STATUS status;
+	QueryTableEntry *iter;
 	bool found;
 
 	nesting_level--;
@@ -871,6 +878,18 @@ void finishRunningQuery(QueryDesc *queryDesc)
 
 		query = GetEntry(queryHashTable, queryDesc, HASH_REMOVE, &found);
 		UpdateStateForRemoving(schedule_state, queryDesc, query, true);
+
+
+		hash_seq_init(&status, queryHashTable);
+
+		while ((iter = (QueryTableEntry *) hash_seq_search(&status)) != NULL)
+		{
+			if (iter->status == QUERY_AVAILABLE){
+				iter->outside_finished++;
+			}
+		}
+
+
 		Reschedule(queryHashTable, schedule_state, QUERY_FINISHED, &env);
 	}else{
 		elog(LOG, "Not removing query from hash table");

@@ -18,7 +18,6 @@ from torch.utils.tensorboard import SummaryWriter
 from typing import NamedTuple
 import torch.multiprocessing as mp
 from concurrent_test import run_batch
-from alive_progress import alive_bar
 import tqdm
 import psutil
 
@@ -138,35 +137,6 @@ class QNetwork(nn.Module):
         return q_values
 
 
-class RequestsServer:
-    def __init__(self):
-        self.control_queue = mp.Queue()
-        self.result = mp.Value("d", 0.0)
-        self.bootstrap_process = mp.Process(target=run_batch, args=(self.result, self.control_queue, False))
-
-    def start(self):
-        self.bootstrap_process.start()
-
-    def kill(self):
-        if not self.bootstrap_process.is_alive():
-            return
-
-        self.control_queue.put("shutdown")
-
-        with alive_bar(
-            title="Waiting unfinished backend processes to exit",
-            spinner="classic",
-            bar=None,
-            monitor=False,
-            elapsed=True,
-            stats=False,
-        ):
-            self.bootstrap_process.join()
-            #while not os.system('ps -ef | grep "[p]ostgres: vscode" > /dev/null'):
-            #    time.sleep(0.5)
-
-        self.control_queue = mp.Queue()
-        self.bootstrap_process = mp.Process(target=run_batch, args=(self.result, self.control_queue, False))
 
 
 class DecisionServer:

@@ -19,14 +19,13 @@
 #include <unistd.h>
 #include <errno.h>
 
-
-
 static void *context;
 static void *requester;
 extern int decision_server_socket;
 extern int getIndexForTableEmbeeding(Oid oid);
 
-void RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state, env_features *env_features);
+void RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state,
+								   env_features *env_features, bool collect_exp);
 void RescheduleRandomly(HTAB *queryTable, ScheduleState *state, env_features *env_features);
 void RescheduleUseHotTableFirst(HTAB *queryTable, ScheduleState *state, env_features *env_features);
 void RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_features);
@@ -34,8 +33,8 @@ int embed_plan_node(double *tensor, Plan *plan, int start);
 response recvDecision(void);
 static void connect_zmq();
 
-
-static void connect_zmq()
+static void
+connect_zmq()
 {
 	context = zmq_ctx_new();
 	requester = zmq_socket(context, ZMQ_REQ);
@@ -63,14 +62,14 @@ recvDecision(void)
 void
 LogQuery(ScheduleState *state, QueryDesc *desc, QueryTableEntry *query_entry)
 {
-	//int oidIndex;
-	//ListCell *curr;
-	//int effective_index = 0;
-	//double *tensor;
-	//int table_one_hot_index;
-	//RangeTblEntry *modifyingRelation;
+	int oidIndex;
+	ListCell *curr;
+	// int effective_index = 0;
+	// double *tensor;
+	// int table_one_hot_index;
+	RangeTblEntry *modifyingRelation;
 	PlannedStmt *plannedStmt;
-	const char * query_string;
+	const char *query_string;
 	char *json_plan;
 
 	plannedStmt = desc->plannedstmt;
@@ -82,6 +81,7 @@ LogQuery(ScheduleState *state, QueryDesc *desc, QueryTableEntry *query_entry)
 	query_entry->key.pid = MyProcPid;
 	query_entry->status = QUERY_BLOCKED;
 	query_entry->xid = GetCurrentTransactionId();
+	query_entry->num_of_relation_access = list_length(desc->plannedstmt->relationOids);
 
 	state->querynum++;
 
@@ -91,22 +91,63 @@ LogQuery(ScheduleState *state, QueryDesc *desc, QueryTableEntry *query_entry)
 
 	free(json_plan);
 
+	oidIndex = 0;
+	foreach (curr, plannedStmt->resultRelations)
+	{
+		modifyingRelation = rt_fetch(lfirst_oid(curr), plannedStmt->rtable);
+
+		if (oidIndex > MAX_AFFECTED_TABLE)
+		{
+			elog(ERROR, "Too many affected tables for query: %s", query_string);
+		}
+
+		query_entry->affected_tables[oidIndex++] = modifyingRelation->relid;
+
+	}
+
 	return;
 }
 
 /* Remove a query from the Global Hashtable.*/
 void
-UpdateStateForRemoving(ScheduleState *state, QueryDesc *desc, QueryTableEntry *query_entry, bool is_running)
+UpdateStateForRemoving(ScheduleState *state, QueryDesc *desc, QueryTableEntry *query_entry,
+					   bool finished)
 {
+	cJSON *reward_json;
+	char *str;
+	char ack[8] = {0};
+	double reward;
+
 	elog(IVM_LOG_LEVEL, "Removing Query xid:%d", query_entry->xid);
 
 	state->querynum--;
-	if (is_running){
+	if (finished)
+	{
 		state->runningQuery--;
+
+		if (query_entry->wakeup_by != -1)
+		{
+			reward = (query_entry->outside_finished + 1) * 1.0 /
+					 ((clock() - query_entry->start_time));
+			reward_json = cJSON_CreateObject();
+			cJSON_AddStringToObject(reward_json, "type", "reward");
+			cJSON_AddNumberToObject(reward_json, "seq", query_entry->wakeup_by);
+			cJSON_AddNumberToObject(reward_json,
+									"reward",
+									reward);
+			str = cJSON_Print(reward_json);
+			zmq_send(requester, str, strlen(str), 0);
+			cJSON_Delete(reward_json);
+			zmq_recv(requester, ack, 8, 0);
+
+			if (strcmp(ack, "ack") != 0)
+			{
+				elog(ERROR, "Failed to receive ack from server.");
+			}
+		}
 	}
 
-	Assert(state->runningQuery >= 0 &&
-		   state->runningQuery <= MAX_CONCURRENT_QUERY);
+	Assert(state->runningQuery >= 0 && state->runningQuery <= MAX_CONCURRENT_QUERY);
 }
 
 /*
@@ -119,6 +160,11 @@ void
 Reschedule(HTAB *queryTable, ScheduleState *state, ScheduleTag tag, env_features *env_features)
 {
 	int avaliable;
+	if (requester == NULL)
+	{
+		connect_zmq();
+	}
+
 	avaliable = MAX_CONCURRENT_QUERY - state->runningQuery;
 
 	env_features->schedule_tag = tag;
@@ -130,17 +176,18 @@ Reschedule(HTAB *queryTable, ScheduleState *state, ScheduleTag tag, env_features
 	 * Therefore, this function will be called whenever a new slot becomes available.
 	 **/
 
-	elog(LOG, "Rescheduling, %d queries are running, %d queries logged",
+	elog(LOG,
+		 "Rescheduling, %d queries are running, %d queries logged",
 		 state->runningQuery,
 		 state->querynum);
 
-	if (true || avaliable == 1)
+	if (false && avaliable == 1)
 	{
 		RescheduleWithServer(queryTable, state, env_features);
 	}
 	else
 	{
-		RescheduleUseMinTableAffected(queryTable, state, env_features);
+		RescheduleUseMinTableAffected(queryTable, state, env_features, true);
 	}
 	Assert(state->runningQuery >= 0 && state->runningQuery <= MAX_CONCURRENT_QUERY);
 }
@@ -153,11 +200,13 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_f
 	QueryTableEntry *query_entry;
 	int available_num;
 	response decision;
-	List *listing = NIL;
+	List *blocking = NIL;
+	List *running = NIL;
 	ListCell *curr = NULL;
 	int giving_up = 0;
 	cJSON *query;
-	cJSON *plans;
+	cJSON *blocked_plans;
+	cJSON *running_plans;
 	cJSON *parsed_plan;
 	char *str;
 
@@ -166,10 +215,6 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_f
 	if (available_num <= 0)
 		return;
 
-	if (requester == NULL)
-	{
-		connect_zmq();
-	}
 
 	hash_seq_init(&status, queryTable);
 
@@ -178,7 +223,11 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_f
 	{
 		if (query_entry->status == QUERY_BLOCKED)
 		{
-			listing = lappend(listing, query_entry);
+			blocking = lappend(blocking, query_entry);
+		}
+		else if (query_entry->status == QUERY_AVAILABLE)
+		{
+			running = lappend(running, query_entry);
 		}
 		else if (query_entry->status == QUERY_GIVE_UP)
 		{
@@ -188,24 +237,35 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_f
 	}
 
 	/* No avaliable query */
-	if (listing == NIL)
+	if (blocking == NIL)
 		return;
 
-  /* if currently have more than 1 queries to select from, query the server */
-	if (list_length(listing) >= 1)
+	/* if currently have more than 1 queries to select from, query the server */
+	if (list_length(blocking) >= 1)
 	{
 		query = cJSON_CreateObject();
-		plans= cJSON_CreateArray();
+		blocked_plans = cJSON_CreateArray();
+		running_plans = cJSON_CreateArray();
 		elog(LOG, "Querying server for decision.");
-		foreach (curr, listing)
+
+		foreach (curr, blocking)
 		{
 			query_entry = (QueryTableEntry *) lfirst(curr);
 			parsed_plan = cJSON_Parse(query_entry->query_plan_json);
-			cJSON_AddItemToArray(plans, parsed_plan);
+			cJSON_AddItemToArray(blocked_plans, parsed_plan);
 		}
 
-		cJSON_AddItemToObject(query, "plans", plans);
+		foreach (curr, running)
+		{
+			query_entry = (QueryTableEntry *) lfirst(curr);
+			parsed_plan = cJSON_Parse(query_entry->query_plan_json);
+			cJSON_AddItemToArray(running_plans, parsed_plan);
+		}
+
+		cJSON_AddItemToObject(query, "candidate_plans", blocked_plans);
+		cJSON_AddItemToObject(query, "running_plans", running_plans);
 		cJSON_AddItemToObject(query, "env", env_to_json(env_features));
+		cJSON_AddStringToObject(query, "type", "schedule");
 
 		str = cJSON_Print(query);
 		zmq_send(requester, str, strlen(str), 0);
@@ -213,27 +273,33 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_f
 		cJSON_Delete(query);
 
 		elog(LOG,
-			 "%d queries sent for decision, %d queries is giving up.",
-			 list_length(listing),
-			 giving_up);
+			 "%d queries sent for decision, %d queries are giving up, %d queries are running.",
+			 list_length(blocking),
+			 giving_up,
+			 list_length(running));
 
 		decision = recvDecision();
 		elog(LOG, "Received decision: %d", decision.decision);
-	}else{
+	}
+	else
+	{
 		decision.decision = 0;
 		elog(LOG, "Only one query is available, start it directly.");
 	}
 
 	/* Start the picked query */
-	query_entry = (QueryTableEntry *) list_nth(listing, decision.decision);
+	query_entry = (QueryTableEntry *) list_nth(blocking, decision.decision);
 	query_entry->status = QUERY_AVAILABLE;
-	query_entry->start_time = clock();
 	query_entry->wakeup_by = decision.decision_id;
 
-	list_free(listing);
+	list_free(running);
+	list_free(blocking);
 
 	state->runningQuery++;
-	elog(LOG, "Starting pid:%d, currently have %d runningQuery", query_entry->key.pid, state->runningQuery);
+	elog(LOG,
+		 "Starting pid:%d, currently have %d runningQuery",
+		 query_entry->key.pid,
+		 state->runningQuery);
 }
 
 typedef struct TableRef
@@ -320,7 +386,10 @@ RescheduleUseHotTableFirst(HTAB *queryTable, ScheduleState *state, env_features 
 			query_entry->status = QUERY_AVAILABLE;
 			state->runningQuery++;
 			query_entry->wakeup_by = -1;
-			elog(LOG, "Starting pid:%d, currently have %d runningQuery", query_entry->key.pid, state->runningQuery);
+			elog(LOG,
+				 "Starting pid:%d, currently have %d runningQuery",
+				 query_entry->key.pid,
+				 state->runningQuery);
 			avaliable = MAX_CONCURRENT_QUERY - state->runningQuery;
 		}
 		else if (query_entry->status == QUERY_GIVE_UP)
@@ -374,12 +443,22 @@ RescheduleRandomly(HTAB *queryTable, ScheduleState *state, env_features *env_fea
 
 /* This function will prioritize start queries that involve the fewest tables. */
 void
-RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state, env_features *env_features)
+RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state, env_features *env_features,
+							  bool collect_exp)
 {
 	HASH_SEQ_STATUS status;
 	QueryTableEntry *query_entry;
 	List *sorted = NIL;
 	List *num_of_affected_tables = NIL;
+	List *running = NIL;
+	List *blocked = NIL;
+	void *to_delete;
+	cJSON *query_json;
+	cJSON *parsed;
+	cJSON *blocked_plans;
+	cJSON *running_plans;
+	char *str;
+	char fake_decision_received[256];
 	ListCell *curr;
 	int j, index;
 	int allowed = 0;
@@ -391,8 +470,7 @@ RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state, env_featur
 
 	while ((query_entry = (QueryTableEntry *) hash_seq_search(&status)) != NULL)
 	{
-		for (j = 0; query_entry->affected_tables[j] != 0; j++)
-			;
+		j = query_entry->num_of_relation_access;
 		index = 0;
 		foreach (curr, sorted)
 		{
@@ -402,6 +480,18 @@ RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state, env_featur
 		}
 		sorted = list_insert_nth(sorted, index, query_entry);
 		num_of_affected_tables = list_insert_nth_int(num_of_affected_tables, index, j);
+
+		if (collect_exp){
+			if (query_entry->status == QUERY_AVAILABLE)
+			{
+				running = lappend(running, query_entry);
+			}
+			else if (query_entry->status == QUERY_BLOCKED)
+			{
+				blocked = lappend(blocked, query_entry);
+			}
+		}
+
 	}
 
 	foreach (curr, sorted)
@@ -409,11 +499,52 @@ RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state, env_featur
 		query_entry = (QueryTableEntry *) lfirst(curr);
 		if (query_entry->status == QUERY_BLOCKED)
 		{
+			to_delete = NULL;
+			if (collect_exp){
+				query_json = cJSON_CreateObject();
+				blocked_plans = cJSON_CreateArray();
+				running_plans = cJSON_CreateArray();
+
+				foreach (curr, running)
+					{
+						parsed = cJSON_Parse(((QueryTableEntry *) lfirst(curr))->query_plan_json);
+						cJSON_AddItemToArray(running_plans, parsed);
+					}
+
+				foreach (curr, blocked)
+					{
+						parsed = cJSON_Parse(((QueryTableEntry *) lfirst(curr))->query_plan_json);
+						cJSON_AddItemToArray(blocked_plans, parsed);
+						if (query_entry == lfirst(curr)){
+							cJSON_AddNumberToObject(query_json, "action", cJSON_GetArraySize(blocked_plans) - 1);
+							running = lappend(running, query_entry);
+							to_delete = query_entry;
+						}
+					}
+				if (to_delete)
+					blocked = list_delete_ptr(blocked, to_delete);
+				cJSON_AddItemToObject(query_json, "candidate_plans", blocked_plans);
+				cJSON_AddItemToObject(query_json, "running_plans", running_plans);
+				cJSON_AddItemToObject(query_json, "env", env_to_json(env_features));
+				cJSON_AddStringToObject(query_json, "type", "schedule");
+				str = cJSON_Print(query_json);
+				zmq_send(requester, str, strlen(str), 0);
+				elog(LOG,"Query Sent");
+				free(str);
+				cJSON_Delete(query_json);
+				zmq_recv(requester, fake_decision_received, 256, 0);
+				query_entry->wakeup_by = cJSON_GetNumberValue(cJSON_GetObjectItem(cJSON_Parse(fake_decision_received), "seq"));
+				elog(LOG,"Received SEQ: %d", query_entry->wakeup_by);
+			}
 			allowed++;
 			query_entry->status = QUERY_AVAILABLE;
 			state->runningQuery++;
-			elog(LOG, "Starting pid:%d, currently have %d runningQuery", query_entry->key.pid, state->runningQuery);
-			query_entry->wakeup_by = -1;
+			elog(LOG,
+				 "Starting pid:%d, currently have %d runningQuery",
+				 query_entry->key.pid,
+				 state->runningQuery);
+			if (!collect_exp)
+				query_entry->wakeup_by = -1;
 		}
 		else if (query_entry->status == QUERY_GIVE_UP)
 		{

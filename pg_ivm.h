@@ -125,7 +125,7 @@ enum schedule_tag
 //8 base tables, 8 immvs, 1 for all other tables
 #define WORKING_TABLES 17
 
-#define HASH_TABLE_SIZE (MAX_QUERY_NUM * sizeof(QueryTableEntry))
+#define HASH_TABLE_SIZE (MAX_QUERY_NUM * sizeof(QueryTableEntry) + 32 * sizeof(LockedTableEntry))
 
 /*
  * The current implementation heavily depends on shared memory,
@@ -149,10 +149,23 @@ typedef struct QueryTableEntry
 	int status;
 	TransactionId xid;
 	clock_t start_time;
+	int outside_finished;
+	int num_of_relation_access;
 
 	/* decision id if waken up by the server, -1 otherwise */
 	int wakeup_by;
 } QueryTableEntry;
+
+typedef struct LockedRelationKey
+{
+	Oid table;
+} LockedTable;
+
+typedef struct LockedRelationEntry
+{
+	LockedTable key;
+	TransactionId held_by;
+} LockedTableEntry;
 
 /* Saving all necessary information we need for query scheduling*/
 typedef struct SchedueState

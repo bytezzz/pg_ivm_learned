@@ -20,8 +20,11 @@ static char* get_relation_name(PlannedStmt* stmt, Plan* node) {
   case T_TidScan:
   case T_ForeignScan:
   case T_CustomScan:
-  case T_ModifyTable:
     rti = ((Scan*)node)->scanrelid;
+    return get_rel_name(rt_fetch(rti, stmt->rtable)->relid);
+    break;
+  case T_ModifyTable:
+    rti = ((ModifyTable*)node)->nominalRelation;
     return get_rel_name(rt_fetch(rti, stmt->rtable)->relid);
     break;
   default:
@@ -107,7 +110,8 @@ char* plan_to_json(PlannedStmt* plan) {
 
   transformed_plan = transform_plan(plan, plan->planTree);
 
-  json = emit_json(transformed_plan);
+  json = cJSON_CreateObject();
+  cJSON_AddItemToObject(json, "Plan", emit_json(transformed_plan));
   cJSON_AddItemToObject(json, "Buffers", buffer_state());
 
   free_bao_plan_node(transformed_plan);

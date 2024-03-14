@@ -1,7 +1,9 @@
 import numpy as np
+from typing import List
 
 JOIN_TYPES = ["Nested Loop", "Hash Join", "Merge Join"]
-LEAF_TYPES = ["Seq Scan", "Index Scan", "Index Only Scan", "Bitmap Index Scan"]
+#LEAF_TYPES = ["Seq Scan", "Index Scan", "Index Only Scan", "Bitmap Index Scan"]
+LEAF_TYPES = ["SCAN"] * 17 + ["Result"]
 ALL_TYPES = JOIN_TYPES + LEAF_TYPES
 
 
@@ -13,7 +15,11 @@ def is_join(node):
     return node["Node Type"] in JOIN_TYPES
 
 def is_scan(node):
-    return node["Node Type"] in LEAF_TYPES
+    #return node["Node Type"] in LEAF_TYPES
+    return 20 <= node["Node Type ID"] <= 36
+
+def is_leaf(node):
+    return node["Node Type ID"] == 11
 
 class TreeBuilder:
     def __init__(self, stats_extractor, relations):
@@ -47,9 +53,14 @@ class TreeBuilder:
     def __featurize_scan(self, node):
         assert is_scan(node)
         arr = np.zeros(len(ALL_TYPES))
-        arr[ALL_TYPES.index(node["Node Type"])] = 1
-        return (np.concatenate((arr, self.__stats(node))),
-                self.__relation_name(node))
+        arr[node['Node Type ID'] - 17] = 1
+        return (np.concatenate((arr, self.__stats(node))),)
+
+    def __featurize_leaf(self, node):
+        assert is_leaf(node)
+        arr = np.zeros(len(ALL_TYPES))
+        arr[-1] = 1
+        return (np.concatenate((arr, self.__stats(node))),)
 
     def plan_to_feature_tree(self, plan):
         children = plan["Plans"] if "Plans" in plan else []
@@ -67,6 +78,10 @@ class TreeBuilder:
         if is_scan(plan):
             assert not children
             return self.__featurize_scan(plan)
+
+        if is_leaf(plan):
+            assert not children
+            return self.__featurize_leaf(plan)
 
         raise TreeBuilderError("Node wasn't transparent, a join, or a scan: " + str(plan))
 
