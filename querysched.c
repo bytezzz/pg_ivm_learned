@@ -18,10 +18,13 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <errno.h>
+#include "storage/procarray.h"
+#include "conf.h"
+#include "utils/lsyscache.h"
 
 static void *context;
 static void *requester;
-extern int decision_server_socket;
+extern HTAB *lockedRelations;
 extern int getIndexForTableEmbeeding(Oid oid);
 
 void RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state,
@@ -31,6 +34,8 @@ void RescheduleUseHotTableFirst(HTAB *queryTable, ScheduleState *state, env_feat
 void RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_features);
 int embed_plan_node(double *tensor, Plan *plan, int start);
 response recvDecision(void);
+bool isRunnable(QueryTableEntry *query_entry, TransactionId caller);
+bool RelationAccessable(Oid oid, TransactionId caller);
 static void connect_zmq();
 
 static void
@@ -85,24 +90,16 @@ LogQuery(ScheduleState *state, QueryDesc *desc, QueryTableEntry *query_entry)
 
 	state->querynum++;
 
-	elog(IVM_LOG_LEVEL, "Logging Transactionid: %u", query_entry->xid);
+	elog(IVM_LOG_LEVEL, "Logging Transactionid: %u, %s", query_entry->xid, desc->sourceText);
 	json_plan = plan_to_json(plannedStmt);
 	strcpy(query_entry->query_plan_json, json_plan);
 
 	free(json_plan);
 
 	oidIndex = 0;
-	foreach (curr, plannedStmt->resultRelations)
+	foreach (curr, plannedStmt->rtable)
 	{
-		modifyingRelation = rt_fetch(lfirst_oid(curr), plannedStmt->rtable);
-
-		if (oidIndex > MAX_AFFECTED_TABLE)
-		{
-			elog(ERROR, "Too many affected tables for query: %s", query_string);
-		}
-
-		query_entry->affected_tables[oidIndex++] = modifyingRelation->relid;
-
+		query_entry->affected_tables[oidIndex++] = ((RangeTblEntry *) lfirst(curr))->relid;
 	}
 
 	return;
@@ -497,7 +494,7 @@ RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state, env_featur
 	foreach (curr, sorted)
 	{
 		query_entry = (QueryTableEntry *) lfirst(curr);
-		if (query_entry->status == QUERY_BLOCKED)
+		if (query_entry->status == QUERY_BLOCKED && isRunnable(query_entry, query_entry->xid))
 		{
 			to_delete = NULL;
 			if (collect_exp){
@@ -529,12 +526,12 @@ RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state, env_featur
 				cJSON_AddStringToObject(query_json, "type", "schedule");
 				str = cJSON_Print(query_json);
 				zmq_send(requester, str, strlen(str), 0);
-				elog(LOG,"Query Sent");
+				//elog(LOG,"Query Sent");
 				free(str);
 				cJSON_Delete(query_json);
 				zmq_recv(requester, fake_decision_received, 256, 0);
 				query_entry->wakeup_by = cJSON_GetNumberValue(cJSON_GetObjectItem(cJSON_Parse(fake_decision_received), "seq"));
-				elog(LOG,"Received SEQ: %d", query_entry->wakeup_by);
+				//elog(LOG,"Received SEQ: %d", query_entry->wakeup_by);
 			}
 			allowed++;
 			query_entry->status = QUERY_AVAILABLE;
@@ -554,4 +551,80 @@ RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state, env_featur
 			state->runningQuery == state->querynum)
 			break;
 	}
+}
+
+bool isRunnable(QueryTableEntry *query_entry, TransactionId caller_xid){
+	Oid curr;
+	RefedImmv *refed_immv;
+	int i,j;
+
+	for (i = 0; i < MAX_AFFECTED_TABLE; i++){
+		curr = query_entry->affected_tables[i];
+		if (curr == 0){
+			break;
+		}
+		refed_immv = getRefrenceImmv(curr);
+		if (refed_immv == NULL)
+			continue;
+		for(j = 0 ; j < refed_immv->refed_table_num; j++){
+			if (!RelationAccessable(refed_immv->refed_table[j], caller_xid)){
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+bool RelationAccessable(Oid oid, TransactionId caller_xid){
+	LockedTableKey key;
+	LockedTableEntry *entry;
+	bool found;
+	memset(&key, 0, sizeof(LockedTableKey));
+	key.table = oid;
+	entry = (LockedTableEntry*) hash_search(lockedRelations, &key, HASH_FIND, &found);
+
+	if (!found || entry->held_by == caller_xid){
+		return true;
+	}
+
+	if (TransactionIdIsInProgress(entry->held_by)){
+		return false;
+	}
+
+	return true;
+}
+
+void AddLockInfo(Oid oid, LOCKMODE lockmode){
+	LockedTableKey key;
+	LockedTableEntry *entry;
+	bool found;
+	char *relname;
+
+	if(lockmode == 0){
+		return;
+	}
+	memset(&key, 0, sizeof(LockedTableKey));
+	key.table = oid;
+	entry = (LockedTableEntry*) hash_search(lockedRelations, &key, HASH_ENTER, &found);
+
+	if (found && TransactionIdIsInProgress(entry->held_by) && entry->held_by != GetTopTransactionId() && entry->mode >= lockmode){
+		elog(ERROR, "Table %d is already locked", oid);
+	}
+
+	entry->held_by = GetTopTransactionId();
+	entry->mode = lockmode;
+	relname = get_rel_name(oid);
+	elog(LOG, "Table %s is now locked by %d in %d mode", relname, entry->held_by, lockmode);
+}
+
+void RemoveLockInfo(Oid oid){
+	LockedTableKey key;
+	bool found;
+	memset(&key, 0, sizeof(LockedTableKey));
+	key.table = oid;
+	hash_search(lockedRelations, &key, HASH_REMOVE, &found);
+	if (!found){
+		elog(ERROR, "Table %d is not locked", oid);
+	}
+	elog(LOG, "Table %d is unlocked", oid);
 }

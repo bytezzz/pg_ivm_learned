@@ -664,6 +664,7 @@ IVM_immediate_before(PG_FUNCTION_ARGS)
 	MV_TriggerHashEntry *entry;
 	bool found;
 	bool ex_lock;
+	char *relname;
 
 	matviewOid = DatumGetObjectId(DirectFunctionCall1(oidin, CStringGetDatum(matviewOid_text)));
 	ex_lock = DatumGetBool(DirectFunctionCall1(boolin, CStringGetDatum(ex_lock_text)));
@@ -671,6 +672,9 @@ IVM_immediate_before(PG_FUNCTION_ARGS)
 	/* If the view has more than one tables, we have to use an exclusive lock. */
 	if (ex_lock)
 	{
+		relname = get_rel_name(matviewOid);
+		elog(IVM_LOG_LEVEL, "Pid %d: IVM_immediate_before: Locking matview: %s.", MyProcPid, relname);
+		pfree(relname);
 		/*
 		 * Wait for concurrent transactions which update this materialized view at
 		 * READ COMMITED. This is needed to see changes committed in other
@@ -697,11 +701,12 @@ IVM_immediate_before(PG_FUNCTION_ARGS)
 							"maintenance",
 							relname)));
 		}
-	}
-	else
+		AddLockInfo(matviewOid, ExclusiveLock);
+	}else{
 		LockRelationOid(matviewOid, RowExclusiveLock);
+		AddLockInfo(matviewOid, RowExclusiveLock);
+	}
 
-	//elog(IVM_LOG_LEVEL, "Pid %d: IVM_immediate_before: Locking matviewOid: %d", MyProcPid, matviewOid);
 
 	/*
 	 * On the first call initialize the hashtable

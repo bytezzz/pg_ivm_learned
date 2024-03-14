@@ -75,7 +75,7 @@ static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 
 static ScheduleState *schedule_state = NULL;
 static HTAB *queryHashTable = NULL;
-static HTAB *lockedRelations = NULL;
+HTAB *lockedRelations = NULL;
 
 
 /* This help to determine if current running query is a top-level query or not
@@ -83,7 +83,6 @@ static HTAB *lockedRelations = NULL;
 static int nesting_level = 0;
 
 /*Socket of Python decision server*/
-int decision_server_socket = -1;
 void *requester = NULL;
 void *context = NULL;
 
@@ -594,6 +593,7 @@ static void
 pg_hook_shmem_startup(void)
 {
 	HASHCTL info;
+	HASHCTL lockInfo;
 	bool found = false;
 
 	if (PrevShmemStartupHook)
@@ -603,11 +603,15 @@ pg_hook_shmem_startup(void)
 	info.keysize = sizeof(QueryTableKey);
 	info.entrysize = sizeof(QueryTableEntry);
 
+	memset(&lockInfo, 0, sizeof(lockInfo));
+	lockInfo.keysize = sizeof(LockedTableKey);
+	lockInfo.entrysize = sizeof(LockedTableEntry);
+
 	/*Initialize the hashtable in shared memory*/
 	queryHashTable =
 		ShmemInitHash("QueryTable", MAX_QUERY_NUM, MAX_QUERY_NUM, &info, HASH_ELEM | HASH_BLOBS);
 
-	lockedRelations = ShmemInitHash("LockedRelations", MAX_QUERY_NUM, MAX_QUERY_NUM, &info,
+	lockedRelations = ShmemInitHash("LockedRelations",32, 32, &lockInfo,
 									HASH_ELEM | HASH_BLOBS);
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
@@ -732,80 +736,13 @@ waiting:
 			env.wakeup_decision_id = -1;
 			memcpy(env.LRU, schedule_state->tableAccessCounter, sizeof(int) * WORKING_TABLES);
 			Reschedule(queryHashTable, schedule_state, DEAD_WAKEUP, &env);
-			status = query_entry->status;
 			LWLockRelease(schedule_state->lock);
 		}
 
 		pg_usleep(30);
 	}
 
-	/*
-	 * Following process helps to avoid dead lock
-	 * Assume the query will affect table A, and table A is refed by Incremental Vives B and C.
-	 * Then we try to acquire locks on B and C toghether.
-	 * Maybe unnecessary, but actually help to avoid dead lock for naive algorithms.
-	*/
-
-	newlyLocked = NULL;
-
-	for (i = 0; i < MAX_AFFECTED_TABLE && query_entry->affected_tables[i] != 0; i++)
-	{
-		refed_immv = getRefrenceImmv(query_entry->affected_tables[i]);
-
-		if (refed_immv == NULL)
-			continue;
-
-		for (j = 0; j < refed_immv->refed_table_num; j++)
-		{
-			SetLocktagRelationOid(&tag, refed_immv->refed_table[j]);
-
-			if (LockHeldByMe(&tag, ExclusiveLock))
-			{
-				continue;
-			}
-			else if (ConditionalLockRelationOid(refed_immv->refed_table[j], ExclusiveLock))
-			{
-				newlyLocked = bms_add_member(newlyLocked, refed_immv->refed_table[j]);
-			}
-			else
-			{
-				iter = -1;
-				while ((iter = bms_next_member(newlyLocked, iter)) >= 0)
-				{
-					UnlockRelationOid(iter, ExclusiveLock);
-				}
-				getLocksHeldByMe(&info);
-				elog(IVM_LOG_LEVEL,
-					"Failed to get all necessary locks to run xid %d, I'm holding %s.",
-					query_entry->xid,
-					info.data);
-				bms_free(newlyLocked);
-
-				LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
-				query_entry->status = QUERY_GIVE_UP;
-				schedule_state->runningQuery--;
-				Assert(schedule_state->runningQuery >= 0 &&
-					   schedule_state->runningQuery <= MAX_CONCURRENT_QUERY);
-
-				env.wakeup_decision_id = query_entry->wakeup_by;
-				memcpy(env.LRU, schedule_state->tableAccessCounter, sizeof(int) * WORKING_TABLES);
-				Reschedule(queryHashTable, schedule_state, QUERY_GIVEUP, &env);
-				LWLockRelease(schedule_state->lock);
-				goto waiting;
-			}
-		}
-	}
-
-	/* Successful reaching here means the query are allowed to run for now. */
-
-	getLocksHeldByMe(&info);
-	elog(IVM_LOG_LEVEL,
-		 "Got all necessary locks to run xid %d,I'm holding %s.",
-		 query_entry->xid,
-		 info.data);
-
 	LWLockAcquire(schedule_state->lock, LW_EXCLUSIVE);
-
 	/* Update table access counter, as an environment feature*/
 	log_table_access(schedule_state, query_entry->affected_tables);
 	query_entry->start_time = clock();

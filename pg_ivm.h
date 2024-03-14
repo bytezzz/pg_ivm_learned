@@ -112,7 +112,7 @@ enum schedule_tag
 };
 
 /* Configurable parameters */
-#define MAX_QUERY_NUM 1000
+#define MAX_QUERY_NUM 100
 #define MAX_QUERY_LENGTH ((Size) 8192)
 #define MAX_AFFECTED_TABLE 100
 
@@ -151,6 +151,7 @@ typedef struct QueryTableEntry
 	clock_t start_time;
 	int outside_finished;
 	int num_of_relation_access;
+	TransactionId waiting_after;
 
 	/* decision id if waken up by the server, -1 otherwise */
 	int wakeup_by;
@@ -159,12 +160,13 @@ typedef struct QueryTableEntry
 typedef struct LockedRelationKey
 {
 	Oid table;
-} LockedTable;
+} LockedTableKey;
 
 typedef struct LockedRelationEntry
 {
-	LockedTable key;
+	LockedTableKey key;
 	TransactionId held_by;
+	LOCKMODE mode;
 } LockedTableEntry;
 
 /* Saving all necessary information we need for query scheduling*/
@@ -254,5 +256,8 @@ extern char* plan_to_json(PlannedStmt* plan);
 extern cJSON* env_to_json(env_features* env);
 
 extern cJSON* buffer_state();
+
+extern void AddLockInfo(Oid oid, LOCKMODE lockmode);
+extern void RemoveLockInfo(Oid oid);
 
 #endif
