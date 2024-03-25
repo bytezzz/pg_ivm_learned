@@ -12,6 +12,7 @@ class Experience(NamedTuple):
 
 class Episode:
     def __init__(self):
+        self.done = False
         self.episode = []
         self.idx2id = {}
         self.id2idx = {}
@@ -26,14 +27,32 @@ class Episode:
         ori = self.episode[idx]
         self.episode[idx] = (*ori, rwd)
 
+    def __getitem__(self, idx):
+        if not self.done:
+            raise ValueError("Episode not finished yet!")
+        return self.exp[idx]
+
+    def __len__(self):
+        if not self.done:
+            raise ValueError("Episode not finished yet!")
+        return len(self.exp)
+
+    def get_reward_sum(self):
+        return self.reward_sum
+
+
     def finish_up(self):
+        self.exp = []
+        reward_sum = 0
         for tup in self.episode:
-            if len(tup) == 2:
-                raise ValueError("Episode not finished")
-        self.exp = [Experience(*tup) for tup in self.episode]
+            if len(tup) == 3:
+                reward_sum += tup[2]
+                self.exp.append(Experience(*tup))
         del self.episode
         del self.idx2id
         del self.id2idx
+        self.done = True
+        self.reward_sum = reward_sum
 
 
 if __name__ == "__main__":
@@ -68,10 +87,15 @@ if __name__ == "__main__":
             socket.send_string("ack")
             print(f"SEQ:{seq} RWD:{rwd} Logged!")
         elif request["type"] == "done":
+            print(f'Episode{epi_index} done!')
             episode.finish_up()
             socket.send_string("ack")
-            with open(f"episode_{epi_index}.pkl", "wb") as f:
+            with open(f"exps/episode_{epi_index}.pkl", "wb") as f:
                 pickle.dump(episode, f)
             epi_index += 1
             episode = Episode()
+        elif request["type"] == "drop":
+            print("Dropping episode, starting a new one.")
+            episode = Episode()
+            socket.send_string("ack")
 

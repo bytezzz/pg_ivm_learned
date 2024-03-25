@@ -717,6 +717,9 @@ waiting:
 			LWLockRelease(schedule_state->lock);
 			RESUME_INTERRUPTS();
 			ProcessInterrupts();
+
+			//Should not reach here
+			ereport(ERRCODE_SYSTEM_ERROR, errmsg("System did not crash after interrupt"));
 		}
 
 		/* Check for any interruptions, such as client disconnected */
@@ -825,7 +828,6 @@ void finishRunningQuery(QueryDesc *queryDesc)
 				iter->outside_finished++;
 			}
 		}
-
 
 		Reschedule(queryHashTable, schedule_state, QUERY_FINISHED, &env);
 	}else{

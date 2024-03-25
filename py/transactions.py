@@ -1,5 +1,6 @@
 import psycopg
 import random
+import decimal
 
 CURRENT_DATE = '1995-06-17'
 
@@ -23,7 +24,7 @@ def shipment(conn: psycopg.Connection):
 
   if ava_quantity < quantity:
   #add avaliable quantity by 1.5 * quantity
-    cursor.execute(f'UPDATE partsupp SET ps_availqty = ps_availqty + {1.5 * quantity} WHERE ps_partkey = {part_key} and ps_suppkey = {supp_key};')
+    cursor.execute(f'UPDATE partsupp SET ps_availqty = ps_availqty + {decimal.Decimal(1.5) * quantity} WHERE ps_partkey = {part_key} and ps_suppkey = {supp_key};')
   # decrease avaliable quantity by quantity
   cursor.execute(f'UPDATE partsupp SET ps_availqty = ps_availqty - {quantity} WHERE ps_partkey = {part_key} and ps_suppkey = {supp_key};')
 

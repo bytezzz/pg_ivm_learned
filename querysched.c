@@ -50,14 +50,14 @@ connect_zmq()
 response
 recvDecision(void)
 {
-	char buffer[256];
+	char buffer[256] = {0};
 	cJSON *root;
 	response response;
 
-	zmq_recv(requester, &buffer, 256, 0);
+	zmq_recv(requester, buffer, 256, 0);
 	root = cJSON_Parse(buffer);
-	response.decision = cJSON_GetObjectItem(root, "decision")->valueint;
-	response.decision_id = cJSON_GetObjectItem(root, "decision_id")->valueint;
+	response.decision = cJSON_GetObjectItem(root, "action")->valueint;
+	response.decision_id = cJSON_GetObjectItem(root, "seq")->valueint;
 
 	elog(IVM_LOG_LEVEL, "Received decision: %d", response.decision);
 	return response;
@@ -173,18 +173,20 @@ Reschedule(HTAB *queryTable, ScheduleState *state, ScheduleTag tag, env_features
 	 * Therefore, this function will be called whenever a new slot becomes available.
 	 **/
 
+	/*
 	elog(LOG,
 		 "Rescheduling, %d queries are running, %d queries logged",
 		 state->runningQuery,
 		 state->querynum);
+	*/
 
-	if (false && avaliable == 1)
+	if (avaliable == 1)
 	{
 		RescheduleWithServer(queryTable, state, env_features);
 	}
 	else
 	{
-		RescheduleUseMinTableAffected(queryTable, state, env_features, true);
+		RescheduleUseMinTableAffected(queryTable, state, env_features, false);
 	}
 	Assert(state->runningQuery >= 0 && state->runningQuery <= MAX_CONCURRENT_QUERY);
 }
@@ -196,11 +198,12 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_f
 	HASH_SEQ_STATUS status;
 	QueryTableEntry *query_entry;
 	int available_num;
+	int index;
 	response decision;
 	List *blocking = NIL;
 	List *running = NIL;
+	List *idx = NIL;
 	ListCell *curr = NULL;
-	int giving_up = 0;
 	cJSON *query;
 	cJSON *blocked_plans;
 	cJSON *running_plans;
@@ -212,24 +215,18 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_f
 	if (available_num <= 0)
 		return;
 
-
 	hash_seq_init(&status, queryTable);
 
 	/* give all queries an order, for fulture decision making */
 	while ((query_entry = (QueryTableEntry *) hash_seq_search(&status)) != NULL)
 	{
-		if (query_entry->status == QUERY_BLOCKED)
+		if (query_entry->status == QUERY_BLOCKED && isRunnable(query_entry, query_entry->xid))
 		{
 			blocking = lappend(blocking, query_entry);
 		}
 		else if (query_entry->status == QUERY_AVAILABLE)
 		{
 			running = lappend(running, query_entry);
-		}
-		else if (query_entry->status == QUERY_GIVE_UP)
-		{
-			query_entry->status = QUERY_BLOCKED;
-			giving_up++;
 		}
 	}
 
@@ -238,7 +235,7 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_f
 		return;
 
 	/* if currently have more than 1 queries to select from, query the server */
-	if (list_length(blocking) >= 1)
+	if (list_length(blocking) > 1)
 	{
 		query = cJSON_CreateObject();
 		blocked_plans = cJSON_CreateArray();
@@ -270,9 +267,8 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_f
 		cJSON_Delete(query);
 
 		elog(LOG,
-			 "%d queries sent for decision, %d queries are giving up, %d queries are running.",
+			 "%d queries sent for decision,  %d queries are running.",
 			 list_length(blocking),
-			 giving_up,
 			 list_length(running));
 
 		decision = recvDecision();
@@ -281,6 +277,7 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_f
 	else
 	{
 		decision.decision = 0;
+		decision.decision_id = -1;
 		elog(LOG, "Only one query is available, start it directly.");
 	}
 
@@ -291,6 +288,7 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_f
 
 	list_free(running);
 	list_free(blocking);
+	list_free(idx);
 
 	state->runningQuery++;
 	elog(LOG,
@@ -456,7 +454,7 @@ RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state, env_featur
 	cJSON *running_plans;
 	char *str;
 	char fake_decision_received[256];
-	ListCell *curr;
+	ListCell *curr, *tmp;
 	int j, index;
 	int allowed = 0;
 
@@ -502,17 +500,24 @@ RescheduleUseMinTableAffected(HTAB *queryTable, ScheduleState *state, env_featur
 				blocked_plans = cJSON_CreateArray();
 				running_plans = cJSON_CreateArray();
 
-				foreach (curr, running)
+				foreach (tmp, running)
 					{
-						parsed = cJSON_Parse(((QueryTableEntry *) lfirst(curr))->query_plan_json);
+						parsed = cJSON_Parse(((QueryTableEntry *) lfirst(tmp))->query_plan_json);
 						cJSON_AddItemToArray(running_plans, parsed);
 					}
 
-				foreach (curr, blocked)
+				/*Bug: 此处Blocked List是在对序列排序的时候根据isRunnable收集的。我们再一次遍历这个list的时候，isRunnable结果已经变了
+					因此也许目前准备启动的任务并不在Blocked List中。
+					Proposal：Build Blocked List的时候不去检查isRunnable，而是只在这里检查。
+				*/
+				foreach (tmp, blocked)
 					{
-						parsed = cJSON_Parse(((QueryTableEntry *) lfirst(curr))->query_plan_json);
+						if (!isRunnable(lfirst(tmp), query_entry->xid))
+							continue;
+
+						parsed = cJSON_Parse(((QueryTableEntry *) lfirst(tmp))->query_plan_json);
 						cJSON_AddItemToArray(blocked_plans, parsed);
-						if (query_entry == lfirst(curr)){
+						if (query_entry == lfirst(tmp)){
 							cJSON_AddNumberToObject(query_json, "action", cJSON_GetArraySize(blocked_plans) - 1);
 							running = lappend(running, query_entry);
 							to_delete = query_entry;

@@ -6,6 +6,7 @@ import threading
 from alive_progress import alive_bar
 import zmq
 import os
+import numpy as np
 
 workload = [shipment, good_receive, update_score, adjust_discount]
 
@@ -38,7 +39,7 @@ def slave(
         time_costs[id] = -1
         return
     except Exception as e:
-        # print(f"Process {id} has been detected exception: {e}")
+        print(f"Process {id} has been detected exception: {e}")
         if "connection pointer is NULL" in str(e):
             print(f"Worker {id} finished!")
         time_costs[id] = -1
@@ -118,7 +119,7 @@ class BatchRunner:
     def start(self) -> None:
         self.bootstrap_process.start()
 
-    def get_result(self) -> List[int]:
+    def get_result(self) -> List[float]:
         self.bootstrap_process.join()
         return list(self.time_costs)
 
@@ -142,18 +143,12 @@ class BatchRunner:
 
 
 if __name__ == "__main__":
-    wl = [[shipment], [good_receive], [update_score], [adjust_discount]]
-    runner = BatchRunner(wl * 2)
-    runner.start()
-    print(runner.get_result())
-
-    contxt = zmq.Context()
-    socket = contxt.socket(zmq.REQ)
-    socket.connect("tcp://localhost:5555")
-
-    socket.send_string("{'type': 'done'}")
-
-    if socket.recv_string() != "ack":
-        raise ValueError("Failed to send done signal")
-    else:
-        print("Done signal has been sent")
+    time_cost = []
+    for i in range(20):
+        wl = [[shipment]]
+        runner = BatchRunner(wl * 8)
+        runner.start()
+        result = runner.get_result()
+        time_cost.extend(result)
+        print("Epoch average cost", np.mean(result))
+    print("Total Average Cost:", np.mean(time_cost))
