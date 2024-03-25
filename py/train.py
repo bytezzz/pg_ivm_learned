@@ -23,8 +23,11 @@ from sequence_generator import SequenceGenerator
 import zmq
 import json
 
+
 @dataclass
 class Args:
+    mode: str = "train"
+    """the mode of the script"""
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
     """the name of this experiment"""
     seed: int = 1
@@ -47,10 +50,6 @@ class Args:
     """the id of the environment"""
     total_episodes: int = 200
     """total timesteps of the experiments"""
-    learning_rate: float = 2.5e-4
-    """the learning rate of the optimizer"""
-    num_envs: int = 1
-    """the number of parallel game environments"""
     buffer_size: int = 2000
     """the replay memory buffer size"""
     gamma: float = 0.99
@@ -68,9 +67,9 @@ class Args:
 
 
 class DecisionServer:
-    def __init__(self, model: MyModel, start_next: mp.Barrier):
+    def __init__(self, model: MyModel, synchronizer: mp.Barrier, enable_training: bool):
         self.process = mp.Process(
-            target=self.decision_func, args=(model, start_next)
+            target=self.decision_func, args=(model, synchronizer, enable_training)
         )
 
     def start(self):
@@ -79,8 +78,11 @@ class DecisionServer:
     def stop(self):
         self.process.kill()
 
+    def join(self):
+        self.process.join()
+
     def decision_func(
-        self, model: MyModel, start_next: mp.Barrier
+        self, model: MyModel, start_next: mp.Barrier, enable_training: bool
     ):
         context = zmq.Context()
         socket = context.socket(zmq.REP)
@@ -88,9 +90,11 @@ class DecisionServer:
 
         # Important! Set the number of threads to 1 to avoid potential performance issues
         torch.set_num_threads(1)
-        episode = Episode()
-        entropies = []
-        episode_idx = 0
+
+        if enable_training:
+            episode = Episode()
+            entropies = []
+            episode_idx = 0
 
         while True:
             msg = str(socket.recv().decode("ascii"))
@@ -102,46 +106,52 @@ class DecisionServer:
                 ).flatten()
                 category = torch.distributions.Categorical(probs)
                 action = category.sample().item()
-                entropies.append(category.entropy().item())
-                #print(f"{seq} action {action} selected")
-                episode.add(
-                    {
-                        "candidate_plans": request["candidate_plans"],
-                        "running_plans": request["running_plans"],
-                    },
-                    action,
-                    seq,
-                )
+                # print(f"{seq} action {action} selected")
+                if enable_training:
+                    entropies.append(category.entropy().item())
+                    episode.add(
+                        {
+                            "candidate_plans": request["candidate_plans"],
+                            "running_plans": request["running_plans"],
+                        },
+                        action,
+                        seq,
+                    )
                 socket.send_string(json.dumps({"seq": seq, "action": action}))
             elif request["type"] == "reward":
-                #print(f"{request['seq']} reward received")
-                episode.set_rwd(request["seq"], request["reward"])
+                # print(f"{request['seq']} reward received")
+                if enable_training:
+                    episode.set_rwd(request["seq"], request["reward"])
                 socket.send_string("ack")
             elif request["type"] == "done":
-                episode.finish_up()
-                actor_loss, vf_loss = model.train(episode)
-                print("Trainer: Episode Training Done")
-                writer.add_scalar("episode/entropies", np.mean(entropies), episode_idx)
-                writer.add_scalar(
-                    "episode/total_reward", episode.get_reward_sum(), episode_idx
-                )
-                writer.add_scalar("episode/actor_loss", actor_loss, episode_idx)
-                writer.add_scalar("episode/vf_loss", vf_loss, episode_idx)
-                print(
-                    f"Episode {episode_idx} States, Entropy: {np.mean(entropies)}, Total Reward: {episode.get_reward_sum()}, Actor Loss: {actor_loss}, VF Loss: {vf_loss}"
-                )
+                if enable_training:
+                    episode.finish_up()
+                    actor_loss, vf_loss = model.train(episode)
+                    print("Trainer: Episode Training Done")
+                    writer.add_scalar(
+                        "episode/entropies", np.mean(entropies), episode_idx
+                    )
+                    writer.add_scalar(
+                        "episode/total_reward", episode.get_reward_sum(), episode_idx
+                    )
+                    writer.add_scalar("episode/actor_loss", actor_loss, episode_idx)
+                    writer.add_scalar("episode/vf_loss", vf_loss, episode_idx)
+                    print(
+                        f"Episode {episode_idx} States, Entropy: {np.mean(entropies)}, Total Reward: {episode.get_reward_sum()}, Actor Loss: {actor_loss}, VF Loss: {vf_loss}"
+                    )
+                    start_next.wait()
+                    if Args.save_model and (episode_idx % Args.model_save_frequncey == 0):
+                        model.save(f"runs/{run_name}/model_latest.ckpt")
+                    episode_idx += 1
+                    episode = Episode()
+                    entropies = []
                 socket.send_string("ack")
-                start_next.wait()
-                if episode_idx % Args.model_save_frequncey == 0:
-                    model.save(f"runs/{run_name}/model_{episode_idx}.ckpt")
-                episode_idx += 1
-                episode = Episode()
-                entropies = []
             elif request["type"] == "drop":
-                episode = Episode()
-                entropies = []
+                if enable_training:
+                    episode = Episode()
+                    entropies = []
+                    start_next.wait()
                 socket.send_string("ack")
-                start_next.wait()
 
 
 def fix_seed(seed):
@@ -154,65 +164,71 @@ def fix_seed(seed):
 if __name__ == "__main__":
 
     args = tyro.cli(Args)
-
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
-
-    writer = GlobalSummaryWriter(log_dir=f"runs/{run_name}", flush_secs=30)
-
-    if args.track:
-        import wandb
-
-        wandb.init(
-            project=args.wandb_project_name,
-            entity=args.wandb_entity,
-            sync_tensorboard=True,
-            config=vars(args),
-            name=run_name,
-            monitor_gym=True,
-            save_code=True,
-        )
-
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s"
-        % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-    )
-
     fix_seed(args.seed)
-
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
-
     model = MyModel(
         args.gamma, args.actor_learning_rate, args.value_network_learning_rate
     )
     model.load_tree_featurizer(args.featurizer_path)
+
+    if args.cuda:
+        model.cuda()
+
     model.share_memory()
+
     print("Model loaded!")
 
-    start_next: mp.Barrier = mp.Barrier(2)
+    if args.mode == "server":
+        decision_server = DecisionServer(model, None, False)
+        decision_server.start()
+        print("Decision server started!")
+        decision_server.join()
+    elif args.mode == "train":
+        run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
 
-    decision_server = DecisionServer(model,start_next)
-    decision_server.start()
-    print("Decision server started!")
+        writer = GlobalSummaryWriter(log_dir=f"runs/{run_name}", flush_secs=30)
 
-    context = zmq.Context()
+        if args.track:
+            import wandb
 
-    for i in range(args.total_episodes):
-        wl = [[shipment]]
-        runner = BatchRunner(wl * 8)
-        runner.start()
-        print("Runner started!")
-        results = runner.get_result()
-        socket = context.socket(zmq.REQ)
-        socket.connect("tcp://localhost:5555")
-        if -1 in results:
-            socket.send_string("{'type': 'drop'}")
-            print("Episode Dropped")
-        else:
-            socket.send_string("{'type': 'done'}")
-            writer.add_scalar("episode/average_time_cost", np.mean(results), i)
-            print(f"Episode Done in {np.mean(results)}")
-        socket.close()
-        start_next.wait()
+            wandb.init(
+                project=args.wandb_project_name,
+                entity=args.wandb_entity,
+                sync_tensorboard=True,
+                config=vars(args),
+                name=run_name,
+                monitor_gym=True,
+                save_code=True,
+            )
 
-    writer.close()
+        writer.add_text(
+            "hyperparameters",
+            "|param|value|\n|-|-|\n%s"
+            % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        )
+
+        start_next: mp.Barrier = mp.Barrier(2)
+        decision_server = DecisionServer(model, start_next, True)
+        decision_server.start()
+        print("Model Training Process Started!")
+
+        context = zmq.Context()
+
+        for i in range(args.total_episodes):
+            wl = [[shipment]]
+            runner = BatchRunner(wl * 8)
+            runner.start()
+            print("Runner started!")
+            results = runner.get_result()
+            socket = context.socket(zmq.REQ)
+            socket.connect("tcp://localhost:5555")
+            if -1 in results:
+                socket.send_string("{'type': 'drop'}")
+                print("Episode Dropped")
+            else:
+                socket.send_string("{'type': 'done'}")
+                writer.add_scalar("episode/average_time_cost", np.mean(results), i)
+                print(f"Episode Done in {np.mean(results)}")
+            socket.close()
+            start_next.wait()
+
+        writer.close()

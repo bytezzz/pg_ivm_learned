@@ -640,13 +640,13 @@ pg_hook_planner(Query *parse, const char *query_string, int cursor_options,
 void
 pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 {
-	int status, i, j, iter;
+	int status;
 	int running;
 	QueryTableEntry *query_entry;
-	RefedImmv *refed_immv;
-	LOCKTAG tag;
-	Bitmapset *newlyLocked = NULL;
-	StringInfoData info;
+	//RefedImmv *refed_immv;
+	//LOCKTAG tag;
+	//Bitmapset *newlyLocked = NULL;
+	//StringInfoData info;
 	bool found;
 	env_features env;
 
@@ -692,7 +692,6 @@ pg_hook_execution_start(QueryDesc *queryDesc, int eflags)
 	LWLockRelease(schedule_state->lock);
 
 	HOLD_INTERRUPTS();
-waiting:
 	for (;;)
 	{
 

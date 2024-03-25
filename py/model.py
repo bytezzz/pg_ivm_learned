@@ -215,6 +215,12 @@ class MyModel:
         self.evaluator.load_state_dict(checkpoint["evaluator"])
         self.value_network.load_state_dict(checkpoint["value_network"])
 
+    def cuda(self):
+        self.query_plan_conv.cuda()
+        self.global_graph_conv.cuda()
+        self.evaluator.cuda()
+        self.value_network.cuda()
+
     def train(self, episode: Episode):
         trajectory_len = len(episode.exp)
         return_array = torch.zeros((trajectory_len,))

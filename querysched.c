@@ -72,7 +72,7 @@ LogQuery(ScheduleState *state, QueryDesc *desc, QueryTableEntry *query_entry)
 	// int effective_index = 0;
 	// double *tensor;
 	// int table_one_hot_index;
-	RangeTblEntry *modifyingRelation;
+	// RangeTblEntry *modifyingRelation;
 	PlannedStmt *plannedStmt;
 	const char *query_string;
 	char *json_plan;
@@ -198,7 +198,7 @@ RescheduleWithServer(HTAB *queryTable, ScheduleState *state, env_features *env_f
 	HASH_SEQ_STATUS status;
 	QueryTableEntry *query_entry;
 	int available_num;
-	int index;
+	//int index;
 	response decision;
 	List *blocking = NIL;
 	List *running = NIL;

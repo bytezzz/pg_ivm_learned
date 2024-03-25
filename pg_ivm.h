@@ -183,13 +183,6 @@ typedef struct SchedueState
 	int tableAccessCounter[WORKING_TABLES];
 } ScheduleState;
 
-#pragma pack(1)
-
-typedef struct payload_t
-{
-	double embedding[1024];
-} query_embed;
-
 typedef struct response_t
 {
 	uint32_t decision_id;
@@ -223,8 +216,6 @@ typedef struct BaoPlanNode {
   // Right child.
   struct BaoPlanNode* right;
 } BaoPlanNode;
-
-#pragma pack()
 
 #define SEGMENT_SIZE (sizeof(ScheduleState))
 

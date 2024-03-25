@@ -1,8 +1,9 @@
-#include "postgres.h"
 
 #ifndef _IVM_CONFIG_H_
 
 #define _IVM_CONFIG_H_
+
+#include "postgres.h"
 
 #define tpch_1 39992
 #define tpch_3 40011
